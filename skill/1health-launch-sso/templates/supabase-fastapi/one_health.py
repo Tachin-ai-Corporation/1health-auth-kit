@@ -7,14 +7,19 @@ Routes (mount with app.include_router(one_health.router)):
   POST /1health/complete-registration  {name, password}
   POST /1health/confirm-link           (confirm-first-link: call after a normal sign-in, Bearer = app session)
 
-Session delivery: redirect to "/#access_token=…&refresh_token=…&expires_in=…&token_type=bearer&type=magiclink".
-The frontend boot code stores both tokens the way the app already stores its session and clears the fragment.
+Session delivery: redirect to "{APP_ORIGIN}/#access_token=…&refresh_token=…&expires_in=…&token_type=bearer&type=magiclink".
+The frontend boot code stores both tokens the way the app already stores its session and clears the fragment
+(references/supabase.md, "FastAPI frontend boot code").
+
+Error responses are JSON `{"message": "..."}` (what the registration component reads), not FastAPI's `{"detail": ...}`.
 
 Requires: cryptography, httpx, PyJWT, itsdangerous, supabase (with auth client that has verify_otp token_hash).
-Adapt: settings access, PROFILE_TABLE, SIGN_IN / SIGN_UP paths, password rules, post-sign-up work.
+Adapt: settings access, PROFILE_TABLE, APP_ORIGIN and the SIGN_IN / SIGN_UP / HOME paths, password rules,
+post-sign-up work, rate limits (in-memory here: per process).
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -22,6 +27,8 @@ import json
 import logging
 import os
 import re
+import time
+from collections import defaultdict, deque
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -31,7 +38,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel
@@ -52,8 +59,14 @@ ENVIRONMENTS = {
     "prod": {"base": "https://app.1health.io",  "secret": os.environ.get("ONE_HEALTH_PROD_LAUNCH_SECRET"), "app_id": os.environ.get("ONE_HEALTH_PROD_APP_ID")},
 }
 PROFILE_TABLE = "profiles"   # ← table whose `id` equals auth.users.id
-SIGN_IN, SIGN_UP, HOME = "/login", "/register", "/"   # ← adapt
+# Where the browser UI lives. Empty when FastAPI serves the SPA on the same origin; set it (e.g.
+# "https://app.example.com") when the API and the SPA are on different origins (references/supabase.md).
+APP_ORIGIN = os.environ.get("ONE_HEALTH_APP_ORIGIN", "").rstrip("/")
+SIGN_IN, SIGN_UP, HOME = "/login", "/register", "/"   # ← adapt (paths on APP_ORIGIN)
 PENDING_COOKIE, PENDING_TTL_S = "oh_pending_link", 15 * 60
+# Per client IP, per process: (max requests, window seconds). Put a shared limiter (Redis, the platform's WAF) in
+# front when the app runs on several workers or instances.
+RATE_LIMITS = {"launch": (10, 60), "complete-registration": (5, 60)}
 _OTC = re.compile(r"^[A-Za-z0-9]{16}$")
 # /myself can return a username in `email` with emailVerified: true (observed for demo QA/system users).
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -63,6 +76,14 @@ TIMEOUT_S = 10
 def _with_param(path: str, key: str, value: str) -> str:
     """Append a query param to a path that may already carry a query string."""
     return f'{path}{"&" if "?" in path else "?"}{urlencode({key: value})}'
+
+
+def _app_url(path: str) -> str:
+    return f"{APP_ORIGIN}{path}"
+
+
+def _error(status: int, message: str) -> JSONResponse:
+    return JSONResponse({"message": message}, status_code=status)
 
 
 _signer = URLSafeTimedSerializer(LINK_COOKIE_SECRET, salt="one-health-pending-link")
@@ -78,9 +99,32 @@ def _admin() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
+# ── rate limiting ──────────────────────────────────────────────────────────────────────────────
+_hits: dict[tuple[str, str], deque] = defaultdict(deque)
+
+
+def _rate_limited(request: Request, bucket: str) -> bool:
+    """Sliding-window limit per client IP. request.client.host is the proxy's IP unless uvicorn runs with
+    --proxy-headers (and --forwarded-allow-ips) behind a trusted proxy."""
+    limit, window = RATE_LIMITS[bucket]
+    now = time.monotonic()
+    q = _hits[(bucket, request.client.host if request.client else "?")]
+    while q and q[0] <= now - window:
+        q.popleft()
+    if len(q) >= limit:
+        return True
+    q.append(now)
+    return False
+
+
 # ── protocol ───────────────────────────────────────────────────────────────────────────────────
 def _key(secret: str) -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=None).derive(secret.encode("utf-8"))
+
+
+def sign_code(secret: str, code: str) -> str:
+    """Base64(HMAC-SHA256(key = RAW launch secret, msg = code)). Not the HKDF-derived key."""
+    return base64.b64encode(hmac.new(secret.encode("utf-8"), code.encode("utf-8"), hashlib.sha256).digest()).decode()
 
 
 def decrypt_launch_payload(lpl: str) -> dict:
@@ -94,32 +138,32 @@ def decrypt_launch_payload(lpl: str) -> dict:
         if not cfg["secret"]:
             continue
         try:
-            data = json.loads(AESGCM(_key(cfg["secret"])).decrypt(raw[:12], raw[12:], None))
+            plaintext = AESGCM(_key(cfg["secret"])).decrypt(raw[:12], raw[12:], None)
         except InvalidTag:
             continue
         try:
+            data = json.loads(plaintext)
             req = data["required"]
-            code = req["oneTimeCode"]["value"]
-            out = {"env": env, "tenant_id": str(req["tenant"]["id"]), "user_id": str(req["user"]["id"]),
-                   "code": code, "optional": data.get("optional") or {}}
-        except (KeyError, TypeError):
+            code, tenant_id, user_id = req["oneTimeCode"]["value"], req["tenant"]["id"], req["user"]["id"]
+        except (ValueError, KeyError, TypeError):  # ValueError covers non-JSON / non-UTF-8 plaintext
             raise LaunchError("payload_invalid")
-        if not isinstance(code, str) or not _OTC.fullmatch(code):
+        if not isinstance(code, str) or not _OTC.fullmatch(code) or tenant_id is None or user_id is None:
             raise LaunchError("payload_invalid")
-        return out
+        optional = data.get("optional")
+        return {"env": env, "tenant_id": str(tenant_id), "user_id": str(user_id), "code": code,
+                "optional": optional if isinstance(optional, dict) else {}}
     raise LaunchError("payload_invalid")
 
 
 async def resolve_launch(lpl: str) -> dict:
     launch = decrypt_launch_payload(lpl)
     cfg = ENVIRONMENTS[launch["env"]]
-    sig = base64.b64encode(hmac.new(cfg["secret"].encode(), launch["code"].encode(), hashlib.sha256).digest()).decode()
     async with httpx.AsyncClient(timeout=TIMEOUT_S) as c:
         try:
             r = await c.post(f'{cfg["base"]}/api/v2/public/external-application/auth/oauth2/user/token',
-                             json={"securityCode": launch["code"], "signature": sig})
+                             json={"securityCode": launch["code"], "signature": sign_code(cfg["secret"], launch["code"])})
             access_token = r.json().get("access_token") if r.status_code == 200 else None
-        except (httpx.HTTPError, ValueError, AttributeError):
+        except (httpx.HTTPError, ValueError, AttributeError):  # network errors and timeouts are httpx.HTTPError
             access_token = None
         if not isinstance(access_token, str) or not access_token:
             raise LaunchError("token_exchange_failed")
@@ -149,7 +193,7 @@ async def resolve_launch(lpl: str) -> dict:
             "last_name": opt.get("user_last_name") or me.get("lastName")}
 
 
-# ── users & sessions ───────────────────────────────────────────────────────────────────────────
+# ── users & sessions (supabase-py is synchronous: routes call these through asyncio.to_thread) ──
 def find_app_user(identity: dict) -> Optional[dict]:
     db = _admin()
     linked = (db.table(PROFILE_TABLE).select("id")
@@ -214,41 +258,43 @@ def _read_pending(request: Request) -> Optional[dict]:
 
 # ── routes ─────────────────────────────────────────────────────────────────────────────────────
 @router.get("/1health/launch")
-async def one_health_launch(lpl: Optional[str] = None):
+async def one_health_launch(request: Request, lpl: Optional[str] = None):
     identity = None
     try:
+        if _rate_limited(request, "launch"):
+            raise LaunchError("rate_limited")
         if not lpl:
             raise LaunchError("launch_missing")
         identity = await resolve_launch(lpl)
-        user = find_app_user(identity)
+        user = await asyncio.to_thread(find_app_user, identity)
         if user is None:
-            audit("no_user", identity)
-            resp = RedirectResponse(_with_param(SIGN_UP, "source", "1health"), 303)
+            await asyncio.to_thread(audit, "no_user", identity)
+            resp = RedirectResponse(_app_url(_with_param(SIGN_UP, "source", "1health")), 303)
             _set_pending(resp, identity)
             return resp
         if not user["linked"]:
             if LINK_POLICY == "confirm-first-link":
-                audit("pending_confirm", identity)
-                resp = RedirectResponse(_with_param(SIGN_IN, "source", "1health"), 303)
+                await asyncio.to_thread(audit, "pending_confirm", identity)
+                resp = RedirectResponse(_app_url(_with_param(SIGN_IN, "source", "1health")), 303)
                 _set_pending(resp, identity)
                 return resp
-            link_identity(user["id"], identity)
-        session = mint_supabase_session(user["email"])
-        audit("success", identity, app_user_id=user["id"])
-        return RedirectResponse(f"{HOME}#{urlencode(session)}", 303)
+            await asyncio.to_thread(link_identity, user["id"], identity)
+        session = await asyncio.to_thread(mint_supabase_session, user["email"])
+        await asyncio.to_thread(audit, "success", identity, app_user_id=user["id"])
+        return RedirectResponse(f"{_app_url(HOME)}#{urlencode(session)}", 303)
     except Exception as e:  # LaunchError codes, plus a friendly page for unexpected DB/Supabase errors
         code = e.code if isinstance(e, LaunchError) else "launch_failed"
         if not isinstance(e, LaunchError):
             log.exception("one_health launch failed")  # never log lpl, tokens or /myself bodies
-        audit("failure", identity, reason=code)
-        return RedirectResponse(_with_param(SIGN_IN, "error", code), 303)
+        await asyncio.to_thread(audit, "failure", identity, reason=code)
+        return RedirectResponse(_app_url(_with_param(SIGN_IN, "error", code)), 303)
 
 
 @router.get("/1health/pending")
 async def one_health_pending(request: Request):
     p = _read_pending(request)
     if not p:
-        raise HTTPException(404, "No pending 1health link")
+        return _error(404, "No pending 1health link")
     return {"email": p["email"], "firstName": p.get("first_name"), "lastName": p.get("last_name")}
 
 
@@ -259,30 +305,32 @@ class CompleteRegistration(BaseModel):
 
 @router.post("/1health/complete-registration")
 async def one_health_complete_registration(body: CompleteRegistration, request: Request):
+    if _rate_limited(request, "complete-registration"):
+        return _error(429, "Too many attempts. Wait a minute and try again.")
     p = _read_pending(request)
     if not p:
-        raise HTTPException(400, "Your 1health launch expired. Open the app from 1health again.")
+        return _error(400, "Your 1health launch expired. Open the app from 1health again.")
     if not body.name.strip() or len(body.password) < 8:   # ← match the repo's password rules
-        raise HTTPException(400, "Enter your name and a password of at least 8 characters.")
+        return _error(400, "Enter your name and a password of at least 8 characters.")
     try:
-        created = _admin().auth.admin.create_user({
+        created = await asyncio.to_thread(_admin().auth.admin.create_user, {
             "email": p["email"], "password": body.password, "email_confirm": True,  # 1health verified the email
             "user_metadata": {"name": body.name.strip()},
         })
     except Exception as exc:
         if "already" in str(exc).lower():
-            raise HTTPException(409, "An account with this email already exists. Sign in instead.")
+            return _error(409, "An account with this email already exists. Sign in instead.")
         # A sign-up gate (trigger on auth.users / before-user-created hook) surfaces as 500 "Database error creating
         # new user": Supabase drops the trigger's message. ← Use the repo's gate copy here.
         log.warning("one_health registration failed: %s", getattr(exc, "message", str(exc)))
         if "database error" in str(exc).lower():
-            raise HTTPException(403, "Account creation is not available for this email address.")
-        raise HTTPException(400, "Registration failed.")
+            return _error(403, "Account creation is not available for this email address.")
+        return _error(400, "Registration failed.")
     # ← Run the repo's normal post-sign-up work here (profile row, defaults, welcome email).
-    link_identity(created.user.id, p)
-    session = mint_supabase_session(p["email"])
-    audit("success", p, app_user_id=created.user.id)
-    resp = JSONResponse({"redirectTo": f"{HOME}#{urlencode(session)}"})
+    await asyncio.to_thread(link_identity, created.user.id, p)
+    session = await asyncio.to_thread(mint_supabase_session, p["email"])
+    await asyncio.to_thread(audit, "success", p, app_user_id=created.user.id)
+    resp = JSONResponse({"redirectTo": f"{_app_url(HOME)}#{urlencode(session)}"})
     resp.delete_cookie(PENDING_COOKIE, path="/")
     return resp
 
@@ -294,11 +342,11 @@ async def one_health_confirm_link(request: Request, authorization: str = Header(
     if not p:
         return {"linked": False}
     token = authorization.removeprefix("Bearer ").strip()
-    user = _admin().auth.get_user(token).user if token else None
+    user = (await asyncio.to_thread(_admin().auth.get_user, token)).user if token else None
     if not user or (user.email or "").lower() != p["email"]:
-        raise HTTPException(403, "Signed-in user does not match the 1health identity")
-    link_identity(user.id, p)
-    audit("success", p, app_user_id=user.id)
+        return _error(403, "Signed-in user does not match the 1health identity")
+    await asyncio.to_thread(link_identity, user.id, p)
+    await asyncio.to_thread(audit, "success", p, app_user_id=user.id)
     resp = JSONResponse({"linked": True})
     resp.delete_cookie(PENDING_COOKIE, path="/")
     return resp
