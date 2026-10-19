@@ -34,7 +34,8 @@ capture it on the 1health **Apps** page before it opens. Run this in that tab's 
 window.open = (u) => { console.log(String(u).replace(/^https:\/\/[^/]+\/[^?]+/, "http://localhost:3001/1health/launch")); return { close() {} }; };
 ```
 
-The tile does nothing, and the console prints a working local launch URL. Open it within a few minutes. (Demo API keys
+The tile does nothing, and the console prints a working local launch URL. Open it within a few minutes. (The general
+procedure, for any target, is in the skill's `references/testing.md`.) (Demo API keys
 can't do this: every key launches as its own `system_…` user with no real email, so they only reach `identity_no_email`.)
 
 ## Live results (1health demo, October 19, 2026)

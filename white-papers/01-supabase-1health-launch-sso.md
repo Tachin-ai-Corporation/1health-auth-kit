@@ -225,18 +225,20 @@ The base URLs are constants (`https://demo.1health.io` and `https://app.1health.
 | # | Component | Runs on |
 |---|---|---|
 | 1 | `decryptLaunchPayload()` (with environment detection) | Server |
-| 2 | `redeemOneTimeCode()` | Server |
-| 3 | `fetchOneHealthIdentity()` + validation | Server |
+| 2 | `redeemOneTimeCode(env, code)` | Server |
+| 3 | `resolveLaunch(lpl)`: runs 1 and 2, then `/myself` + validation | Server |
 | 4 | `findAppUser()`: by linked 1health ID, then by email | Server (service role) |
 | 5 | `linkOneHealthIdentity()` | Server (service role) |
 | 6 | `mintSupabaseSession()` | Server |
-| 7 | `GET /1health/launch`: runs 1–6, then redirects | Server |
+| 7 | `GET /1health/launch`: runs 3–6, then redirects | Server |
 | 8 | Prefilled registration + `POST /1health/complete-registration` | Server + UI |
 | 9 | Audit log, rate limit | Server |
 
 The 1health access and refresh tokens **stay on the server**. Discard them after step 3. If you call 1health APIs on the user's behalf, encrypt them at rest instead. (The 1health app template does the opposite and stores 1health tokens in browser cookies. That template is for apps whose *only* backend is 1health. See §9.)
 
 The code below is shown in **Python (FastAPI + supabase-py)** and **TypeScript (Next.js App Router + `@supabase/ssr`)**.
+
+**Excerpts vs. templates.** The tested, complete code is the skill's templates: `templates/ts/protocol.ts` and `templates/supabase-next/*` (Next.js), and `templates/supabase-fastapi/one_health.py` (FastAPI, where steps 1–3 are one `resolve_launch(lpl)`). In §5, the TypeScript excerpts use the templates' names and signatures, and the blocks marked *template copy* are byte-for-byte copies that CI checks. The **Python excerpts are illustrative**: they split the steps into smaller functions to explain them, and leave out the template's rate limiting, timeouts on every call and `asyncio.to_thread` wrapping. Copy from the template, not from this paper.
 
 ---
 
@@ -260,7 +262,9 @@ ENVIRONMENTS = {
 _OTC = re.compile(r"^[A-Za-z0-9]{16}$")
 
 class LaunchError(Exception):
-    def __init__(self, code, status=400): super().__init__(code); self.code, self.status = code, status
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
 
 def _key(secret: str) -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=None).derive(secret.encode())
@@ -303,7 +307,9 @@ export const ENVIRONMENTS = {
 } as const;
 export type OneHealthEnv = keyof typeof ENVIRONMENTS;
 
-export class LaunchError extends Error { constructor(public code: string, public status = 400) { super(code); } }
+export export class LaunchError extends Error {
+  constructor(public code: string) { super(code); }
+}
 
 const deriveKey = (secret: string) =>
   Buffer.from(hkdfSync("sha256", Buffer.from(secret, "utf8"), Buffer.alloc(0), Buffer.alloc(0), 32));
@@ -324,7 +330,8 @@ export function decryptLaunchPayload(lpl: string) {
     const r = data?.required, code = r?.oneTimeCode?.value;
     if (typeof code !== "string" || !/^[A-Za-z0-9]{16}$/.test(code) || r?.tenant?.id == null || r?.user?.id == null)
       throw new LaunchError("payload_invalid");
-    return { env, tenantId: String(r.tenant.id), userId: String(r.user.id), code, optional: data.optional ?? {} };
+    return { env, tenantId: String(r.tenant.id), userId: String(r.user.id), code,
+             optional: (data.optional ?? {}) as Record<string, string | undefined> };
   }
   throw new LaunchError("payload_invalid");
 }
@@ -345,22 +352,22 @@ async def redeem_one_time_code(launch: dict) -> dict:
                          json={"securityCode": launch["code"], "signature": sig})
     body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
     if r.status_code != 200 or not body.get("access_token"):
-        raise LaunchError("token_exchange_failed", 502)   # used/expired code, wrong secret, or app not ACTIVE
+        raise LaunchError("token_exchange_failed")   # used/expired code, wrong secret, or app not ACTIVE
     return body
 ```
 
 ```ts
-import { createHmac } from "node:crypto";
-
-export async function redeemOneTimeCode(launch: { env: OneHealthEnv; code: string }) {
-  const { base, secret } = ENVIRONMENTS[launch.env];
-  const signature = createHmac("sha256", secret!).update(launch.code, "utf8").digest("base64");
+// From templates/ts/protocol.ts (its `call` helper inlined): a timeout on every 1health call.
+export async function redeemOneTimeCode(env: OneHealthEnv, code: string) {
+  const { base, secret } = ENVIRONMENTS[env];
+  // HMAC uses the RAW launch secret, not the HKDF-derived key.
+  const signature = createHmac("sha256", secret!).update(code, "utf8").digest("base64");
   const res = await fetch(`${base}/api/v2/public/external-application/auth/oauth2/user/token`, {
     method: "POST", headers: { "Content-Type": "application/json" }, cache: "no-store",
-    body: JSON.stringify({ securityCode: launch.code, signature }),
-  });
+    body: JSON.stringify({ securityCode: code, signature }), signal: AbortSignal.timeout(10_000),
+  }).catch(() => { throw new LaunchError("token_exchange_failed"); });
   const body = await res.json().catch(() => null);
-  if (!res.ok || !body?.access_token) throw new LaunchError("token_exchange_failed", 502);
+  if (!res.ok || typeof body?.access_token !== "string") throw new LaunchError("token_exchange_failed");
   return body as { access_token: string; refresh_token?: string; expires_in: number };
 }
 ```
@@ -375,9 +382,9 @@ async def fetch_one_health_identity(tokens: dict, launch: dict) -> dict:
     try:
         claims = jwt.decode(tokens["access_token"], options={"verify_signature": False})
     except jwt.PyJWTError:
-        raise LaunchError("token_exchange_failed", 502)
+        raise LaunchError("token_exchange_failed")
     if str(claims.get("externalApplicationId")) != str(cfg["app_id"]):
-        raise LaunchError("wrong_application", 403)
+        raise LaunchError("wrong_application")
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get(f'{cfg["base"]}/api/v2/user/myself',
@@ -386,21 +393,21 @@ async def fetch_one_health_identity(tokens: dict, launch: dict) -> dict:
     except (httpx.HTTPError, ValueError):
         me = None
     if not isinstance(me, dict):
-        raise LaunchError("identity_lookup_failed", 502)
+        raise LaunchError("identity_lookup_failed")
     email = str(me.get("email") or "").strip().lower()
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):   # QA/system users return a username here
-        raise LaunchError("identity_no_email", 502)
+        raise LaunchError("identity_no_email")
     if me.get("emailVerified") is not True:
-        raise LaunchError("email_not_verified", 403)
+        raise LaunchError("email_not_verified")
     if not tenant_allowed(launch["env"], launch["tenant_id"]):
-        raise LaunchError("tenant_not_allowed", 403)
+        raise LaunchError("tenant_not_allowed")
     opt = launch["optional"]
     return {"env": launch["env"], "tenant_id": launch["tenant_id"], "user_id": launch["user_id"], "email": email,
             "first_name": opt.get("user_first_name") or me.get("firstName"),
             "last_name":  opt.get("user_last_name")  or me.get("lastName")}
 ```
 
-The TypeScript version is a direct translation (`skill/…/templates/ts/protocol.ts`). Use `decodeJwt` from `jose` to read the plain-text claims, wrapped in `try`. Put a timeout on every 1health call (`AbortSignal.timeout(10_000)`).
+The TypeScript version is `resolveLaunch(lpl)` in `templates/ts/protocol.ts` (white paper 02 §5 prints it in full). It decrypts, redeems, and validates in one call, returning `{ env, tenantId, userId, email, firstName, lastName }`. It reads the plain-text claims with `decodeJwt` from `jose`, wrapped in `try`, and puts a timeout on every 1health call (`AbortSignal.timeout(10_000)`).
 
 **Why each check exists**
 
@@ -447,28 +454,42 @@ def mint_supabase_session(email: str) -> dict:
             "expires_in": s.expires_in, "token_type": "bearer"}
 ```
 
-**TypeScript (`@supabase/ssr`).** `verifyOtp` on the cookie-bound server client **sets the session cookies for you**:
+**TypeScript (`@supabase/ssr`).** `verifyOtp` on the cookie-bound server client **sets the session cookies for you** (template copy, `lib/one-health/session.ts`):
 
+<!-- template: supabase-next/session.ts -->
 ```ts
+// lib/one-health/session.ts — create a native Supabase session for an existing user (server only).
+// generateLink(magiclink) through the Admin API sends NO email; verifyOtp on the cookie-bound
+// server client redeems it and writes the normal @supabase/ssr session cookies.
+import "server-only";
 import { createClient } from "@supabase/supabase-js";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
+import { LaunchError } from "./protocol";
 
-export async function mintSupabaseSession(email: string) {
-  const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { persistSession: false, autoRefreshToken: false } });
-  const { data, error } = await admin.auth.admin.generateLink({ type: "magiclink", email });
-  if (error || !data.properties?.hashed_token) throw new LaunchError("session_mint_failed", 502);
+export function adminClient() {
+  return createClient(process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
 
+/** Reuse the repo's existing server-client helper if it has one (e.g. lib/supabase/server.ts). */
+async function cookieClient() {
   const store = await cookies();
-  const supabase = createServerClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
+  return createServerClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
     cookies: {
       getAll: () => store.getAll(),
       setAll: (list) => list.forEach(({ name, value, options }) => store.set(name, value, options)),
     },
   });
+}
+
+export async function mintSupabaseSession(email: string): Promise<void> {
+  const { data, error } = await adminClient().auth.admin.generateLink({ type: "magiclink", email });
+  if (error || !data.properties?.hashed_token) throw new LaunchError("session_mint_failed");
+  const supabase = await cookieClient();
   const { error: vErr } = await supabase.auth.verifyOtp({ token_hash: data.properties.hashed_token, type: "magiclink" });
-  if (vErr) throw new LaunchError("session_mint_failed", 502);
+  if (vErr) throw new LaunchError("session_mint_failed");
 }
 ```
 
@@ -489,7 +510,7 @@ Notes:
 
 Browsers never send URL fragments to servers or include them in `Referer` headers. Do the whole launch in **one server request that ends in a redirect**. Don't return JSON to a top-level navigation.
 
-**FastAPI route**
+**FastAPI route** (illustrative; the template's version also rate-limits, honors confirm-first-link and runs supabase-py calls in `asyncio.to_thread`)
 
 ```python
 from fastapi.responses import RedirectResponse
@@ -522,26 +543,55 @@ async def one_health_launch(lpl: str | None = None):
         return RedirectResponse(f"/login?error={code}", 303)   # page explains: "launch again from 1health"
 ```
 
-**Next.js route handler** (`app/1health/launch/route.ts`)
+**Next.js route handler** (template copy, `lib/one-health/launch-route.ts`; `app/1health/launch/route.ts` re-exports its `GET`). Paths and the linking policy come from `lib/one-health/config.ts`, and `rateLimited` from `lib/one-health/rate-limit.ts` (§5.9):
 
+<!-- template: supabase-next/launch-route.ts -->
 ```ts
+// app/1health/launch/route.ts — the URL registered in 1health: {origin}/1health/launch
 import { NextRequest, NextResponse } from "next/server";
+import { LaunchError, resolveLaunch, type OneHealthIdentity } from "@/lib/one-health/protocol";
+import { mintSupabaseSession } from "@/lib/one-health/session";
+import { auditLaunch, findAppUser, linkOneHealthIdentity } from "@/lib/one-health/users";
+import { setPendingLink } from "@/lib/one-health/pending-cookie";
+import { HOME, POLICY, SIGN_IN, SIGN_UP, withParam } from "@/lib/one-health/config";
+import { rateLimited } from "@/lib/one-health/rate-limit";
+
+export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
-  const go = (p: string) => NextResponse.redirect(new URL(p, req.url), 303);
-  const lpl = req.nextUrl.searchParams.get("lpl");
-  if (!lpl) return go("/login?error=launch_missing");
+  const go = (path: string) => NextResponse.redirect(new URL(path, req.url), 303);
+  let identity: OneHealthIdentity | undefined;
   try {
-    const launch = decryptLaunchPayload(lpl);
-    const tokens = await redeemOneTimeCode(launch);
-    const identity = await fetchOneHealthIdentity(tokens, launch);
+    if (rateLimited(req, "launch")) throw new LaunchError("rate_limited");
+    const lpl = req.nextUrl.searchParams.get("lpl");
+    if (!lpl) throw new LaunchError("launch_missing");
+    identity = await resolveLaunch(lpl);
+
     const user = await findAppUser(identity);
-    if (!user) { await setPendingLinkCookie(identity); return go("/register?source=1health"); }
-    await linkOneHealthIdentity(user, identity);
+    if (!user) {
+      await setPendingLink(identity);
+      await auditLaunch("no_user", identity);
+      return go(withParam(SIGN_UP, "source", "1health"));
+    }
+    if (!user.linked) {
+      if (POLICY === "confirm-first-link") {
+        // After a successful normal sign-in, the sign-in page POSTs /1health/confirm-link (confirm-link-route.ts),
+        // which links the identity. See references/supabase.md, "confirm-first-link".
+        await setPendingLink(identity);
+        await auditLaunch("pending_confirm", identity);
+        return go(withParam(SIGN_IN, "source", "1health"));
+      }
+      await linkOneHealthIdentity(user.id, identity);
+    }
     await mintSupabaseSession(user.email);
-    return go("/");
+    await auditLaunch("success", identity, { appUserId: user.id });
+    return go(HOME);
   } catch (e) {
-    return go(`/login?error=${e instanceof LaunchError ? e.code : "launch_failed"}`);
+    const code = e instanceof LaunchError ? e.code : "launch_failed";
+    // Never log lpl, tokens or /myself bodies.
+    if (!(e instanceof LaunchError)) console.error("[1health] launch failed", { error: (e as Error)?.message });
+    await auditLaunch("failure", identity, { reason: code });
+    return go(withParam(SIGN_IN, "error", code));
   }
 }
 ```
@@ -561,7 +611,7 @@ export async function GET(req: NextRequest) {
 ### 5.9 Audit and rate limiting
 
 - Write one audit row per launch: outcome, reason code, environment, 1health tenant and user IDs, and app user ID. **Never** log emails, tokens, one-time codes or `/myself` responses.
-- Rate-limit `/1health/launch`, for example 10 requests per minute per IP.
+- Rate-limit `/1health/launch` (for example 10 requests per minute per IP) and `/1health/complete-registration` (5 per minute). Both Supabase templates ship an in-memory limiter (`lib/one-health/rate-limit.ts`; `RATE_LIMITS` in `one_health.py`). It holds per process or serverless instance, so for a hard limit put a shared one (Redis/Upstash, the platform's firewall) in front of `/1health/*`. Rate-limited launches redirect with `?error=rate_limited`.
 
 ---
 
@@ -666,6 +716,7 @@ The working implementation is the source of truth. Where the documents disagree 
 3. Is `emailVerified` always present on `/v2/user/myself`? Can a tenant admin change a user's email without re-verification? Why do QA/system users report a username as a verified `email`?
 4. Could the launch carry an app-supplied **`returnTo`/`state`**, for deep links and login-CSRF protection?
 5. Is registering an app on **production** (`app.1health.io`) self-service, or does it need approval?
+6. Is a 1health **`user.id` global across tenants**, or per tenant? The link key is `(one_health_env, one_health_tenant_id, one_health_user_id)`. If the same person launches from a second tenant, the linked lookup misses, the verified email matches an account already linked to the first tenant's identity, and the launch fails with `identity_conflict`, even though it is the same person. Untested. If user IDs are global, keying links on `(env, user_id)` (keeping the tenant for the allow-list and audit) would avoid it. If they are per tenant, the product has to decide whether one app account may hold several 1health links.
 
 ---
 

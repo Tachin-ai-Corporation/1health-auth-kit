@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  better-auth:
+    name: Better Auth templates (vitest + tsc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: reference/better-auth
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: reference/better-auth/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm typecheck
+
+  fastapi:
+    name: FastAPI template (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: reference/fastapi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+
+  supabase-next:
+    name: Supabase Next templates (sync check + tsc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: reference/supabase-next
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: reference/supabase-next/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check-sync
+      - run: pnpm typecheck
+
+  docs:
+    name: Docs drift and skill self-containment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/check-docs.mjs

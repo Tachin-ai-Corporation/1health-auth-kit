@@ -3,7 +3,7 @@
 **Technical white paper for developers.** Version 0.2 (draft), October 2026. Tachin.
 Verified against **better-auth 1.6.29** (`@better-auth/core` 1.6.29, `better-call` 1.4.0) and Next.js 16 (App Router).
 
-> **Verification status (v0.2).** The code in §5–§6 is identical to the skill templates and has been checked in three ways:
+> **Verification status (v0.2).** The code blocks in §5, §6.1 and §6.4 are copies of the skill templates; `scripts/check-docs.mjs` fails CI if they drift. The templates have been checked in three ways:
 > 1. **Type-checks** against better-auth 1.6.29 at both ES2022 and ES6 targets.
 > 2. **Passes a 31-test vitest suite** (`skill/…/templates/tests/`). The suite runs the real plugin through `auth.handler` with the memory adapter and mocked 1health. It includes the failure cases that v0.1 got wrong, and fails three of them when run against the v0.1 plugin.
 > 3. **Ran live against 1health demo** in a production Better Auth app, Carrier (Next.js 16.3, `pg` Pool, Neon on Vercel), in October 2026:
@@ -178,6 +178,7 @@ const links = await db.select().from(account)
 
 This module is framework-independent and works the same in any Node server.
 
+<!-- template: ts/protocol.ts -->
 ```ts
 // 1health launch handshake: encrypted `lpl` payload → one-time-code redemption → /api/v2/user/myself.
 // Framework-independent; every failure is a LaunchError with a stable code (see references/troubleshooting.md).
@@ -298,6 +299,7 @@ export async function resolveLaunch(lpl: string): Promise<OneHealthIdentity> {
 
 ### 6.1 Code
 
+<!-- template: better-auth/plugin.ts -->
 ```ts
 import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthEndpoint, createAuthMiddleware, isAPIError } from "better-auth/api";
@@ -524,36 +526,45 @@ The existing catch-all `app/api/auth/[...all]/route.ts` (`toNextJsHandler(auth)`
 
 ### 6.4 Registration UI
 
-On the sign-up page, when `?source=1health` is present:
+On the sign-up page, when `?source=1health` is present (`templates/shared/OneHealthRegistration.tsx`; the same component serves the Supabase templates):
 
+<!-- template: shared/OneHealthRegistration.tsx -->
 ```tsx
 "use client";
 // Render on the sign-up page when ?source=1health is present. Adapt markup to the repo's form components.
-// Supabase templates: change the two URLs to /1health/pending and /1health/complete-registration.
+// Better Auth: defaults work as-is. Supabase templates (Next.js and FastAPI): pass pendingUrl="/1health/pending" and
+// completeUrl="/1health/complete-registration". Every stack answers errors as JSON { message }.
+// FastAPI on a different origin from the SPA: pass the API's absolute URLs and change `credentials` to "include"
+// (references/supabase.md, "Split API and SPA origins").
 import { useEffect, useState } from "react";
 
 type Pending = { email: string; firstName: string | null; lastName: string | null };
 
-export function OneHealthRegistration({ fallback }: { fallback?: React.ReactNode }) {
+export function OneHealthRegistration({
+  fallback,
+  pendingUrl = "/api/auth/1health/pending",
+  completeUrl = "/api/auth/1health/complete-registration",
+}: { fallback?: React.ReactNode; pendingUrl?: string; completeUrl?: string }) {
   const [pending, setPending] = useState<Pending | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    fetch("/api/auth/1health/pending", { cache: "no-store", credentials: "same-origin" })
+    fetch(pendingUrl, { cache: "no-store", credentials: "same-origin" })
       .then((r) => (r.ok ? r.json() : null)).then(setPending).catch(() => setPending(null));
-  }, []);
+  }, [pendingUrl]);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setBusy(true); setError(null);
     const form = new FormData(e.currentTarget);
-    const res = await fetch("/api/auth/1health/complete-registration", {
+    const res = await fetch(completeUrl, {
       method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: form.get("name"), password: form.get("password") }),
     });
     const data = await res.json().catch(() => ({}));
     setBusy(false);
+    // Includes sign-up gate errors (e.g. a databaseHooks domain allow-list): show the server's message.
     if (!res.ok) return setError(data.message ?? "Registration failed.");
     window.location.assign(data.redirectTo ?? "/"); // full load so the server sees the new session
   }
@@ -575,7 +586,7 @@ export function OneHealthRegistration({ fallback }: { fallback?: React.ReactNode
 
 If sign-up is hidden behind a flag or an invite parameter, set the plugin's `signUpPath` to a URL that shows the form, for example `signUpPath: "/sign-up?signup=enabled"`. The plugin appends `&source=1health`. Server-side gates (database hooks) still apply, and the hook's error message reaches the form unchanged.
 
-On the sign-in page, map `?error=` codes to friendly text. The most common is `token_exchange_failed`: *"This launch link has expired or was already used. Open the app from 1health again."* For `?source=1health` (confirm-first-link), show *"Sign in once to connect your 1health account."*
+On the sign-in page, map `?error=` codes to friendly text with `signInNotice({ error, source })` from `templates/shared/messages.ts`. The most common is `token_exchange_failed`: *"This launch link has expired or was already used. Open the app from 1health again."* For `?source=1health` (confirm-first-link), it shows *"Sign in once to connect your 1health account."*
 
 ### 6.5 Other Node frameworks (Hono, Express, Fastify, …)
 
@@ -707,6 +718,10 @@ All the protocol-level differences between 1health's documents and what has been
 ## 11. Open questions for 1health
 
 The open questions in the companion paper's §10 also apply here: JWKS, the authoritative code lifetime, `emailVerified` guarantees (including why QA/system users report a username as a verified email), launch `state`/`returnTo`, and production registration.
+
+One matters more here, because of how the plugin keys links:
+
+- **Is a 1health `user.id` global across tenants?** The plugin's link key is `account.accountId = "<env>:<tenantId>:<userId>"`. If the same person launches from a second tenant, the linked lookup misses, the verified email matches a user that already has a `1health` account row, and the launch fails with `identity_conflict`, even though it is the same person. Untested. If user IDs are global, keying links on `<env>:<userId>` (with the tenant kept for the allow-list and audit) would avoid it. If they are per tenant, a product decision is needed: allow several `1health` links per user, or keep refusing.
 
 ---
 
