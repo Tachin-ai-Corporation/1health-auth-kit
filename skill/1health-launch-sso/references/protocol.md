@@ -51,7 +51,7 @@ The access-token JWT's identifying claims (`sub`, `userId`, `username`, `roles`,
 
 - Check `externalApplicationId` against the app ID for that environment. Decoding without verifying the signature is fine here, because the next call proves the token is valid.
 - `GET {BASE}/api/v2/user/myself` (Bearer) returns `id`, `email`, `username`, **`emailVerified`**, `tenants`, `tenantContext`, and a lot of PII (DOB, partial SSN, …). Read only `email`, `emailVerified` and names. Never log, store or forward the rest.
-- **`emailVerified: true` doesn't mean `email` is an address.** Demo QA and system users (e.g. `system_1health_<app>-qa-manager`) return their username in `email`, still with `emailVerified: true`. Require an address (`x@y.z`). Otherwise reject with `identity_no_email` and never match, link or register on it.
+- **`emailVerified: true` doesn't mean `email` is an address.** Every demo **API key** gets its own system user (e.g. `system_1health_<app>-qa-manager`, `system_<tenant name>_<key label>`), even when a real person created the key. These users return their username in `email`, still with `emailVerified: true`. Require an address (`x@y.z`). Otherwise reject with `identity_no_email` and never match, link or register on it.
 
 ## 5. Tokens
 
@@ -70,6 +70,8 @@ Authorization: Bearer <demo QA user's API key>
 Use it as `?lpl=`. Each payload works once. Demo throttles bursts (you'll get 401s for minutes), so don't retry in a loop. QA keys must never reach production. Manager, employee and sys-admin QA keys could all mint for Carrier's app (Oct 2026).
 
 **Re-targeting a real launch.** A tile click opens `<registered launch URL>?lpl=…`. If that host can't handle it yet (e.g. production before merge returns 404), the code is still unspent. Swap the origin for a preview's and open it within the code lifetime. This works because every deployment shares the same secret.
+
+**Capturing a real person's launch without spending it.** On the 1health Apps page, override `window.open` in DevTools to log the URL, then click the tile. The tile calls `window.open(<launch URL>?lpl=…)`, so nothing opens and the code stays unspent. Swap the origin and path for the app under test.
 
 **Configuration probe (no 1health login needed).** Encrypt a well-formed payload with the local secret and a fake code, then send it to a deployment (`templates/scripts/probe-launch.mjs`). `token_exchange_failed` proves that deployment has the same secret and reaches 1health. `payload_invalid` means its secret is missing or different.
 
@@ -91,4 +93,5 @@ Use it as `?lpl=`. Each payload works once. Demo throttles bursts (you'll get 40
 - A JWKS URL for verifying the access token (`/oauth2/jwks` is suggested but unconfirmed).
 - Whether `emailVerified` is guaranteed on `/myself`, and why QA/system users report a username as a verified `email`.
 - Launch-time `state`/`returnTo` support.
+- **Is `user.id` global across tenants?** The link key is `<env>:<tenantId>:<userId>`. If the same person launches from a second tenant, the linked lookup misses, the email matches an account that is already linked, and the result is `identity_conflict`. Untested. If 1health user IDs are global, keying links on `<env>:<userId>` (with the tenant stored separately) would avoid this.
 - How production app approval works.

@@ -30,9 +30,15 @@ export async function POST(req: NextRequest) {
     email: p.email, password, email_confirm: true, user_metadata: { name },
   });
   if (error || !data.user) {
-    const exists = /already/i.test(error?.message ?? "");
-    return NextResponse.json({ message: exists ? "An account with this email already exists. Sign in instead." : "Registration failed." },
-                             { status: exists ? 409 : 400 });
+    if (/already/i.test(error?.message ?? ""))
+      return NextResponse.json({ message: "An account with this email already exists. Sign in instead." }, { status: 409 });
+    // A sign-up gate (a trigger on auth.users, or a "before user created" auth hook) that rejects the email reaches
+    // here as a 500 "Database error creating new user": Supabase hides the trigger's own message. ← If the repo
+    // gates sign-up, show its usual copy here (or check the gate before calling createUser).
+    console.error("[1health] registration failed", { status: error?.status, message: error?.message });
+    if (error?.status === 500 && /database error/i.test(error.message))
+      return NextResponse.json({ message: "Account creation is not available for this email address." }, { status: 403 });
+    return NextResponse.json({ message: "Registration failed." }, { status: 400 });
   }
 
   // ← Run the repo's normal post-sign-up work here (profile row if not created by a trigger, defaults, welcome email).

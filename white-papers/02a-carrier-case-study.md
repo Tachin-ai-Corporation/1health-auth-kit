@@ -67,14 +67,16 @@ The same bug classes (1, 3, 4, 5) were in the FastAPI template. Its new pytest s
 | Existing verified user, real tile click, re-targeted | Preview | **Auto-linked (`demo:4:315987`) and signed in.** Link and session rows written 10 ms apart. |
 | Linked user, real tile click | Production | Signed in silently (audit `success`) |
 | Unknown user (new address on an allowed domain) | Production | Prefilled registration (audit `no_user`) |
+| Same user completes registration | Production | ✅ Account created and verified, credential + 1health link (`demo:55911:…`), joined the workspace through the sign-up hook, and signed in |
+| Email already linked to a different 1health user (link swapped to a fake ID for one launch, then restored) | Production | ✅ `identity_conflict` page, no session. After the restore, the next launch signed in silently. |
 
-Not yet tested live:
-- completing a registration, with the domain gate open for tachin.ai after migration 004;
-- the domain-gate rejection message on the form;
-- `identity_conflict`;
-- `confirm-first-link`.
+The real launches above were captured on the 1health Apps page (`window.open` override) and replayed. API keys can't stand in for people: every key launches as its own `system_…` user.
 
-All four pass in the e2e suite.
+Not tested live **in Carrier**:
+- the sign-up gate rejecting a registration (all of Neil's demo users are on an allowed domain);
+- `confirm-first-link` (it would need a production config change).
+
+Both pass in the e2e suite, and both passed live in the Supabase reference app (`reference/supabase-next/README.md`).
 
 ## 6. Takeaway
 

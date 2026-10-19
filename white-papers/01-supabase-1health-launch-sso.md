@@ -8,7 +8,9 @@
 > - The launch route turns *any* unexpected error into `?error=launch_failed`.
 > - New pre-merge testing techniques are in §7.
 >
-> The FastAPI template now has a pytest suite (14 tests) and has actually been run. The Supabase templates themselves have **not** yet run against live 1health.
+> **Verification.** The Next.js templates ran live against 1health demo in `reference/supabase-next` (Next 16, `@supabase/ssr`, local Supabase), with a real demo user. All six scenarios passed: auto-link, relaunch, prefilled registration, sign-up gate rejection, identity conflict, and confirm-first-link. Minting the session sent no email. The FastAPI template has a 14-test pytest suite but hasn't run live. Hosted-project settings (Site URL, redirect allow-list) are untested.
+>
+> **Finding:** Supabase reports a sign-up gate's rejection (a trigger on `auth.users` or a before-user-created hook) as a 500 "Database error creating new user". The trigger's message is lost, so map that case to the gate's copy (§5.8).
 
 ---
 
@@ -551,6 +553,7 @@ export async function GET(req: NextRequest) {
 3. The form posts to `POST /1health/complete-registration` with the password, name, and whatever else normal sign-up collects. The server then:
    - verifies the cookie, and **uses the cookie's email**, ignoring any email in the request body;
    - calls `auth.admin.createUser({ email, password, email_confirm: true, user_metadata })`. Pre-confirming is safe because 1health already verified the email (§5.3);
+   - if the app gates sign-up with a trigger or auth hook, a rejected email comes back as a 500 "Database error creating new user", because Supabase drops the trigger's message. Show the gate's usual copy for that case (the template does), not a generic failure;
    - runs your normal post-sign-up logic (profile row, defaults, welcome email);
    - links the 1health identity, mints the session, clears the cookie, and redirects into the app.
 4. If the cookie has expired, fall back to normal sign-up. The next launch from 1health links the account by email.

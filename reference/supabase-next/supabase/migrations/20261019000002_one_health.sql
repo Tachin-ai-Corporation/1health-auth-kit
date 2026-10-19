@@ -1,0 +1,1 @@
+../../../../skill/1health-launch-sso/templates/sql/supabase.sql

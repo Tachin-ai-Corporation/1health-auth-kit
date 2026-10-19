@@ -8,11 +8,12 @@ Verified against **better-auth 1.6.29** (`@better-auth/core` 1.6.29, `better-cal
 > 2. **Passes a 31-test vitest suite** (`skill/…/templates/tests/`). The suite runs the real plugin through `auth.handler` with the memory adapter and mocked 1health. It includes the failure cases that v0.1 got wrong, and fails three of them when run against the v0.1 plugin.
 > 3. **Ran live against 1health demo** in a production Better Auth app, Carrier (Next.js 16.3, `pg` Pool, Neon on Vercel), in October 2026:
 >    - a real tile click auto-linked and signed in an existing user;
->    - an unknown user got the prefilled registration;
+>    - an unknown user completed the prefilled registration and was linked;
+>    - an email already linked to another 1health identity was refused with `identity_conflict`;
 >    - reloading a used launch gave `token_exchange_failed`;
 >    - demo QA users gave `identity_no_email`.
 >
-> Completing a registration, the sign-up gate's error and an identity conflict have only been tested in the suite, not live. See the companion case study `02a-carrier-case-study.md`.
+> The sign-up gate's error and `confirm-first-link` have only been tested in the suite here, though both passed live in the Supabase reference app. See the companion case study `02a-carrier-case-study.md`.
 >
 > **Changes from v0.1:**
 > - unexpected errors redirect to `launch_failed` instead of a 500;

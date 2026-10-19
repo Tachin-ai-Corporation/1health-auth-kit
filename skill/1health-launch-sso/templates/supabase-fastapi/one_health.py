@@ -272,6 +272,11 @@ async def one_health_complete_registration(body: CompleteRegistration, request: 
     except Exception as exc:
         if "already" in str(exc).lower():
             raise HTTPException(409, "An account with this email already exists. Sign in instead.")
+        # A sign-up gate (trigger on auth.users / before-user-created hook) surfaces as 500 "Database error creating
+        # new user": Supabase drops the trigger's message. ← Use the repo's gate copy here.
+        log.warning("one_health registration failed: %s", getattr(exc, "message", str(exc)))
+        if "database error" in str(exc).lower():
+            raise HTTPException(403, "Account creation is not available for this email address.")
         raise HTTPException(400, "Registration failed.")
     # ← Run the repo's normal post-sign-up work here (profile row, defaults, welcome email).
     link_identity(created.user.id, p)

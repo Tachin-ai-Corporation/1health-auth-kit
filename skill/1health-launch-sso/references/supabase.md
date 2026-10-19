@@ -40,6 +40,10 @@ Browsers don't send URL fragments to servers or include them in `Referer`. Handl
 3. If the email belongs to an account already linked to a *different* 1health user, return `identity_conflict`.
 4. Never call `generateLink` to find out whether a user exists.
 
+## Sign-up gates hide their message
+
+A gate that rejects the email reaches `admin.createUser` as `status 500, "Database error creating new user"`, whether it's a trigger on `auth.users` raising an exception or a "before user created" auth hook. Supabase doesn't pass the trigger's own text through. The template maps that case to "Account creation is not available for this email address." Use the repo's own copy, or check the gate before calling `createUser`. Verified on local Supabase, October 2026.
+
 ## Unmatched user
 
 The launch sets a signed, HttpOnly, 15-minute `oh_pending_link` cookie (Next: `jose`, Python: `itsdangerous`) and redirects to sign-up with `?source=1health`. The registration page:

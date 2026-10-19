@@ -1,0 +1,23 @@
+{
+  "name": "1health-supabase-next-reference",
+  "private": true,
+  "type": "module",
+  "description": "Minimal Next.js + Supabase (@supabase/ssr) app running the skill's Supabase templates against a local Supabase.",
+  "scripts": {
+    "sync": "node scripts/sync-templates.mjs",
+    "check-sync": "node scripts/sync-templates.mjs --check",
+    "dev": "node scripts/sync-templates.mjs && next dev -p 3001",
+    "build": "next build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@supabase/ssr": "0.12.0",
+    "@supabase/supabase-js": "2.118.0",
+    "jose": "^6.2.12",
+    "next": "16.3.0",
+    "react": "^19",
+    "react-dom": "^19",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": { "@types/node": "^24", "@types/react": "^19", "typescript": "5.7.3" }
+}

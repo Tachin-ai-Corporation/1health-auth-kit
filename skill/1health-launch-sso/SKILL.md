@@ -17,10 +17,10 @@ Supported stacks:
 
 **How well each set is proven (Oct 2026).**
 - **Better Auth:** live-verified against 1health demo in a production app.
+- **Supabase + Next.js:** live-verified against 1health demo in the reference app on a local Supabase (all six scenarios), but not yet in a hosted production app.
 - **Supabase + FastAPI:** unit-tested, but not live with these templates.
-- **Supabase + Next.js:** type-checked only, not live.
 
-On a Supabase repo, treat the integration as the first live validation. Probe each deployment, test live before merging (§6), and expect to report fixes back.
+On a Supabase repo, treat the integration as the first production validation. Probe each deployment, test live before merging (§6), and expect to report fixes back.
 
 For any other stack, stop and tell the user it isn't supported yet. Point them to `references/protocol.md` and explain the one stack-specific question they need to answer: *how do I create a native session for an existing user from the server?*
 
@@ -160,7 +160,8 @@ Tell the user exactly what remains for them, step by step and in plain words. Us
    - mint a launch for the preview with `scripts/mint-qa-launch.mjs <previewLaunchUrl>`; or
    - click the tile, then replace the origin in the 404 page's address bar with the preview's origin, keeping the path and `?lpl=…`, and press Enter within a few minutes. The code hasn't been spent.
 
-   Demo QA users may return a **username** in `/myself.email`. They only exercise the error paths (`identity_no_email`). Link and registration scenarios need a demo user with a real, verified email: one matching an existing app user, and one new.
+   - If production already serves the route, the tile spends the code there. Instead, capture the launch on the 1health Apps page: in DevTools, override `window.open` to print the URL, then click the tile. See `reference/supabase-next/README.md`.
+   - **API keys can't stand in for people.** Every demo API key launches as its own `system_…` user, with a username in `/myself.email`, so it only exercises `identity_no_email`. The linking and registration scenarios need real demo users with verified emails: one matching an existing app user, and one new. Their launches have to be captured.
 7. **After merge:** click the tile on production and run the scenario matrix in `references/troubleshooting.md`.
 
 Report what you changed, what you tested, and what you could **not** verify (for example, no live 1health launch from the sandbox). Then ask before you push, merge or deploy.
