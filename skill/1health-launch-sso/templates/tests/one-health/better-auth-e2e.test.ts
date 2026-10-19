@@ -1,11 +1,12 @@
 // End-to-end: drives the real oneHealth plugin through auth.handler with Better Auth's memory adapter and
 // mocked 1health endpoints. ADAPT makeAuth() to mirror the repo's lib/auth.ts wherever it matters for 1health:
-// sign-up gates (databaseHooks.user.create.before), requireEmailVerification, autoSignIn, and the exact plugin
-// options (signInPath / signUpPath / afterLaunchPath). Keep every scenario; add repo-specific ones.
+// sign-up gates (databaseHooks.user.create.before), requireEmailVerification, autoSignIn,
+// autoSignInAfterVerification, and the exact plugin options (signInPath / signUpPath / afterLaunchPath). Keep every
+// scenario; add repo-specific ones.
 import { randomBytes } from "node:crypto"
 import { betterAuth } from "better-auth"
 import { memoryAdapter } from "better-auth/adapters/memory"
-import { APIError } from "better-auth/api"
+import { APIError, createEmailVerificationToken } from "better-auth/api"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import { oneHealth, type OneHealthLaunchEvent as LaunchEvent } from "@/lib/one-health/plugin"
 import { DEMO_APP_ID, encryptPayload, fakeJwt, launchPayload } from "./helpers"
@@ -20,6 +21,7 @@ function makeAuth(linkPolicy?: "auto-link" | "confirm-first-link") {
     baseURL: BASE,
     database: memoryAdapter(db),
     emailAndPassword: { enabled: true, requireEmailVerification: true, autoSignIn: false },
+    emailVerification: { autoSignInAfterVerification: true },
     databaseHooks: {
       user: {
         create: {
@@ -96,17 +98,36 @@ const oneHealthLinks = (db: ReturnType<typeof makeAuth>["db"]) =>
 describe("1health launch (auto-link, repo config)", () => {
   const { auth, db, events } = makeAuth()
 
-  it("existing unverified user with a matching email: links, marks verified, signs in", async () => {
+  it("existing UNVERIFIED user with a matching email: no link, no session, not marked verified", async () => {
+    // Pre-account takeover guard: whoever signed up chose the password, and it may not be the email's owner.
     await auth.api.signUpEmail({ body: { email: `known@${SIGNUP_DOMAIN}`, password: "password123", name: "K" } })
     expect(db.user[0].emailVerified).toBe(false)
 
     const r = await launch(auth, mint(`Known@${SIGNUP_DOMAIN.toUpperCase()}`, 100))
     expect(r.status).toBe(302)
-    expect(r.headers.get("location")).toBe("/")
-    expect(await sessionEmail(auth, r)).toBe(`known@${SIGNUP_DOMAIN}`)
-    expect(oneHealthLinks(db)).toEqual(["demo:7:100"])
+    expect(r.headers.get("location")).toBe("/sign-in?source=1health")
+    expect(r.headers.get("set-cookie") ?? "").not.toMatch(/session_token/)
+    expect(oneHealthLinks(db)).toEqual([])
+    expect(db.user[0].emailVerified).toBe(false)
+    expect(events.at(-1)).toMatchObject({ outcome: "pending_confirm", reason: "account_unverified", oneHealthUserId: "100" })
+
+    // The password alone doesn't link: sign-in is refused until the email is verified.
+    const signIn = await auth.handler(
+      new Request(`${BASE}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: { cookie: cookiesOf(r), "content-type": "application/json", origin: BASE },
+        body: JSON.stringify({ email: `known@${SIGNUP_DOMAIN}`, password: "password123" }),
+      }),
+    )
+    expect(signIn.status).toBe(403)
+    expect(oneHealthLinks(db)).toEqual([])
+
+    // Verifying the email through the normal flow (auto sign-in) links the pending launch.
+    const token = await createEmailVerificationToken(process.env.BETTER_AUTH_SECRET!, `known@${SIGNUP_DOMAIN}`)
+    const v = await auth.handler(new Request(`${BASE}/api/auth/verify-email?token=${token}`, { headers: { cookie: cookiesOf(r) } }))
+    expect(await sessionEmail(auth, v)).toBe(`known@${SIGNUP_DOMAIN}`)
     expect(db.user[0].emailVerified).toBe(true)
-    expect(events.at(-1)).toMatchObject({ outcome: "success", env: "demo", tenantId: "7", oneHealthUserId: "100" })
+    expect(oneHealthLinks(db)).toEqual(["demo:7:100"])
   })
 
   it("relaunch uses the existing link", async () => {
@@ -202,6 +223,19 @@ describe("1health launch (auto-link, repo config)", () => {
     ).rejects.toThrow("Account creation is not available")
     await auth.api.signUpEmail({ body: { email: `plain@${SIGNUP_DOMAIN}`, password: "password123", name: "P" } })
     await expect(auth.api.signInEmail({ body: { email: `plain@${SIGNUP_DOMAIN}`, password: "password123" } })).rejects.toThrow()
+  })
+})
+
+describe("link policy configuration", () => {
+  it("an unknown ONE_HEALTH_LINK_POLICY fails at startup instead of defaulting to auto-link", () => {
+    vi.stubEnv("ONE_HEALTH_LINK_POLICY", "confirm-first")
+    try {
+      expect(() => oneHealth()).toThrow(/ONE_HEALTH_LINK_POLICY must be/)
+      vi.stubEnv("ONE_HEALTH_LINK_POLICY", "")
+      expect(() => oneHealth()).not.toThrow() // empty = unset = auto-link
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })
 

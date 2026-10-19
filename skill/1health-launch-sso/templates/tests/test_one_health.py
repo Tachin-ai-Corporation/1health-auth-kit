@@ -190,11 +190,85 @@ def test_launch_signs_in_existing_user(client, monkeypatch):
     async def ok(_):
         return IDENTITY
     monkeypatch.setattr(oh, "resolve_launch", ok)
-    monkeypatch.setattr(oh, "find_app_user", lambda _: {"id": "u1", "email": "a@b.co", "linked": True})
+    monkeypatch.setattr(oh, "find_app_user", lambda _: {"id": "u1", "email": "a@b.co", "linked": True, "verified": True})
     monkeypatch.setattr(oh, "mint_supabase_session", lambda _: {"access_token": "at", "refresh_token": "rt"})
     monkeypatch.setattr(oh, "APP_ORIGIN", "https://app.example.com")  # split API / SPA origins
     r = client.get("/1health/launch", params={"lpl": "x"})
     assert r.headers["location"] == "https://app.example.com/#access_token=at&refresh_token=rt"
+
+
+def test_launch_never_auto_links_unconfirmed_account(client, monkeypatch):
+    # Pre-account takeover guard: an unconfirmed auth.users row's password may belong to someone else.
+    async def ok(_):
+        return IDENTITY
+    monkeypatch.setattr(oh, "resolve_launch", ok)
+    monkeypatch.setattr(oh, "find_app_user", lambda _: {"id": "u1", "email": "a@b.co", "linked": False, "verified": False})
+    calls = []
+    monkeypatch.setattr(oh, "link_identity", lambda *a: calls.append("link"))
+    monkeypatch.setattr(oh, "mint_supabase_session", lambda _: calls.append("session"))
+    r = client.get("/1health/launch", params={"lpl": "x"})
+    assert r.headers["location"] == "/login?source=1health" and "oh_pending_link" in r.headers["set-cookie"]
+    assert calls == []
+
+    # A confirmed account auto-links (policy auto-link).
+    monkeypatch.setattr(oh, "find_app_user", lambda _: {"id": "u1", "email": "a@b.co", "linked": False, "verified": True})
+    monkeypatch.setattr(oh, "mint_supabase_session", lambda _: calls.append("session") or {"access_token": "at"})
+    r = client.get("/1health/launch", params={"lpl": "x"})
+    assert r.headers["location"] == "/#access_token=at" and calls == ["link", "session"]
+
+
+class _Query:
+    """Minimal stand-in for supabase-py's table(...) builder: update(...).eq(...).execute() and insert(...).execute()."""
+    def __init__(self, log, updated_rows, insert_error):
+        self.log, self.updated_rows, self.insert_error, self.op = log, updated_rows, insert_error, None
+
+    def update(self, fields):
+        self.op = ("update", fields)
+        return self
+
+    def insert(self, row):
+        self.op = ("insert", row)
+        return self
+
+    def eq(self, *_):
+        return self
+
+    def execute(self):
+        self.log.append(self.op)
+        if self.op[0] == "insert" and self.insert_error:
+            raise self.insert_error
+        return type("Res", (), {"data": self.updated_rows if self.op[0] == "update" else [self.op[1]]})()
+
+
+@pytest.mark.parametrize("updated,insert_error,expect", [
+    ([{"id": "u1"}], None, ["update"]),                    # profile row exists
+    ([], None, ["update", "insert"]),                      # no row (or one_health_links): insert
+    ([], RuntimeError("null value in column"), "link_failed"),
+])
+def test_link_identity_checks_rows(monkeypatch, updated, insert_error, expect):
+    log = []
+    db = type("Db", (), {"table": lambda self, _: _Query(log, updated, insert_error)})()
+    monkeypatch.setattr(oh, "_admin", lambda: db)
+    if expect == "link_failed":
+        with pytest.raises(oh.LaunchError, match="link_failed"):
+            oh.link_identity("u1", IDENTITY)
+    else:
+        oh.link_identity("u1", IDENTITY)
+        assert [op for op, _ in log] == expect
+
+
+@pytest.mark.parametrize("env,match", [
+    ({"ONE_HEALTH_LINK_COOKIE_SECRET": ""}, "ONE_HEALTH_LINK_COOKIE_SECRET"),
+    ({"ONE_HEALTH_LINK_COOKIE_SECRET": "too-short"}, "ONE_HEALTH_LINK_COOKIE_SECRET"),
+    ({"ONE_HEALTH_LINK_POLICY": "confirm"}, "ONE_HEALTH_LINK_POLICY"),
+])
+def test_config_fails_at_import(monkeypatch, env, match):
+    import importlib.util
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    spec = importlib.util.spec_from_file_location("one_health_config_check", oh.__file__)
+    with pytest.raises(RuntimeError, match=match):
+        spec.loader.exec_module(importlib.util.module_from_spec(spec))
 
 
 def test_launch_rate_limited(client, monkeypatch):

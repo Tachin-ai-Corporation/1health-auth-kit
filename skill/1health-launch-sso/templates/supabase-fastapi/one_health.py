@@ -51,14 +51,21 @@ router = APIRouter()
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY") or os.environ["SUPABASE_KEY"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-LINK_COOKIE_SECRET = os.environ["ONE_HEALTH_LINK_COOKIE_SECRET"]
-LINK_POLICY = os.environ.get("ONE_HEALTH_LINK_POLICY", "auto-link")
+# Fail at startup, not per request: an empty secret would make the pending-link cookie forgeable (itsdangerous
+# accepts an empty key), and an unknown policy must not silently mean auto-link.
+LINK_COOKIE_SECRET = os.environ.get("ONE_HEALTH_LINK_COOKIE_SECRET", "")
+if len(LINK_COOKIE_SECRET) < 32:
+    raise RuntimeError("ONE_HEALTH_LINK_COOKIE_SECRET must be set to 32+ random characters (openssl rand -hex 32)")
+LINK_POLICY = os.environ.get("ONE_HEALTH_LINK_POLICY", "").strip() or "auto-link"   # empty = auto-link
+if LINK_POLICY not in ("auto-link", "confirm-first-link"):
+    raise RuntimeError(f'ONE_HEALTH_LINK_POLICY must be "auto-link" or "confirm-first-link", got "{LINK_POLICY}"')
 ALLOWED_TENANTS = {t.strip() for t in os.environ.get("ONE_HEALTH_ALLOWED_TENANT_IDS", "").split(",") if t.strip()}
 ENVIRONMENTS = {
     "demo": {"base": "https://demo.1health.io", "secret": os.environ.get("ONE_HEALTH_DEMO_LAUNCH_SECRET"), "app_id": os.environ.get("ONE_HEALTH_DEMO_APP_ID")},
     "prod": {"base": "https://app.1health.io",  "secret": os.environ.get("ONE_HEALTH_PROD_LAUNCH_SECRET"), "app_id": os.environ.get("ONE_HEALTH_PROD_APP_ID")},
 }
-PROFILE_TABLE = "profiles"   # ← table whose `id` equals auth.users.id
+PROFILE_TABLE = "profiles"   # ← table whose `id` equals auth.users.id (or "one_health_links", see sql/supabase.sql)
+PROFILE_ID = "id"            # ← that column ("user_id" for one_health_links)
 # Where the browser UI lives. Empty when FastAPI serves the SPA on the same origin; set it (e.g.
 # "https://app.example.com") when the API and the SPA are on different origins (references/supabase.md).
 APP_ORIGIN = os.environ.get("ONE_HEALTH_APP_ORIGIN", "").rstrip("/")
@@ -196,27 +203,40 @@ async def resolve_launch(lpl: str) -> dict:
 # ── users & sessions (supabase-py is synchronous: routes call these through asyncio.to_thread) ──
 def find_app_user(identity: dict) -> Optional[dict]:
     db = _admin()
-    linked = (db.table(PROFILE_TABLE).select("id")
+    linked = (db.table(PROFILE_TABLE).select(PROFILE_ID)
               .eq("one_health_env", identity["env"]).eq("one_health_tenant_id", identity["tenant_id"])
               .eq("one_health_user_id", identity["user_id"]).limit(1).execute()).data
     if linked:
-        u = db.auth.admin.get_user_by_id(linked[0]["id"]).user
+        u = db.auth.admin.get_user_by_id(linked[0][PROFILE_ID]).user
         if u and u.email:
-            return {"id": u.id, "email": u.email, "linked": True}
+            return {"id": u.id, "email": u.email, "linked": True, "verified": True}
     user_id = db.rpc("auth_user_id_by_email", {"p_email": identity["email"]}).execute().data
     if not user_id:
         return None
-    row = db.table(PROFILE_TABLE).select("one_health_user_id").eq("id", user_id).limit(1).execute().data
+    row = db.table(PROFILE_TABLE).select("one_health_user_id").eq(PROFILE_ID, user_id).limit(1).execute().data
     if row and row[0].get("one_health_user_id"):
         raise LaunchError("identity_conflict")
-    return {"id": user_id, "email": identity["email"], "linked": False}
+    # An unconfirmed auth.users row may have been created by someone else with a password of their choosing, so the
+    # launch never auto-links it (pre-account takeover). verified=False sends it down the confirm-first-link path.
+    u = db.auth.admin.get_user_by_id(user_id).user
+    return {"id": user_id, "email": identity["email"], "linked": False, "verified": bool(u and u.email_confirmed_at)}
 
 
 def link_identity(user_id: str, identity: dict) -> None:
-    _admin().table(PROFILE_TABLE).update({
-        "one_health_env": identity["env"], "one_health_tenant_id": identity["tenant_id"],
-        "one_health_user_id": identity["user_id"],
-    }).eq("id", user_id).execute()
+    """Write the link or raise LaunchError("link_failed"). update().eq() alone "succeeds" with zero rows when the
+    user has no profile row yet (or on one_health_links), so insert when nothing matched."""
+    db = _admin()
+    fields = {"one_health_env": identity["env"], "one_health_tenant_id": identity["tenant_id"],
+              "one_health_user_id": identity["user_id"]}
+    try:
+        if db.table(PROFILE_TABLE).update(fields).eq(PROFILE_ID, user_id).execute().data:
+            return
+        # On a profiles table with other NOT NULL columns this insert fails: create the profile row in the repo's
+        # post-sign-up work first, or use one_health_links.
+        db.table(PROFILE_TABLE).insert({PROFILE_ID: user_id, **fields}).execute()
+    except Exception as exc:  # postgrest APIError: unique-index conflict, missing grant, NOT NULL, …
+        log.warning("one_health link failed: %s", getattr(exc, "message", type(exc).__name__))
+        raise LaunchError("link_failed") from exc
 
 
 def mint_supabase_session(email: str) -> dict:
@@ -273,8 +293,11 @@ async def one_health_launch(request: Request, lpl: Optional[str] = None):
             _set_pending(resp, identity)
             return resp
         if not user["linked"]:
-            if LINK_POLICY == "confirm-first-link":
-                await asyncio.to_thread(audit, "pending_confirm", identity)
+            # Unconfirmed accounts are never auto-linked or signed in (the magic-link session would also confirm
+            # them): same path as confirm-first-link; the user confirms the email, signs in, then confirm-link.
+            if LINK_POLICY == "confirm-first-link" or not user["verified"]:
+                await asyncio.to_thread(audit, "pending_confirm", identity,
+                                        reason=None if user["verified"] else "account_unverified")
                 resp = RedirectResponse(_app_url(_with_param(SIGN_IN, "source", "1health")), 303)
                 _set_pending(resp, identity)
                 return resp

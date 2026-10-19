@@ -8,9 +8,10 @@ const PROVIDER_ID = "1health";
 const PENDING = "oh_pending_link";
 const PENDING_TTL_S = 15 * 60;
 
-type LinkPolicy = "auto-link" | "confirm-first-link";
+const LINK_POLICIES = ["auto-link", "confirm-first-link"] as const;
+type LinkPolicy = (typeof LINK_POLICIES)[number];
 export interface OneHealthOptions {
-  linkPolicy?: LinkPolicy;            // default: env ONE_HEALTH_LINK_POLICY or "auto-link"
+  linkPolicy?: LinkPolicy;            // default: env ONE_HEALTH_LINK_POLICY or "auto-link"; other values throw at startup
   signInPath?: string;                // default "/sign-in"
   signUpPath?: string;                // default "/sign-up"; may carry a query string (e.g. "/sign-up?invite=open")
   afterLaunchPath?: string;           // default "/"
@@ -26,12 +27,25 @@ const accountIdOf = (i: Pick<OneHealthIdentity, "env" | "tenantId" | "userId">) 
 const withParam = (path: string, key: string, value: string) =>
   `${path}${path.includes("?") ? "&" : "?"}${key}=${encodeURIComponent(value)}`;
 
+/** Explicit option, else ONE_HEALTH_LINK_POLICY (empty = unset), else auto-link. Unknown values fail closed: throw. */
+function resolvePolicy(option?: string): LinkPolicy {
+  const v = option ?? (process.env.ONE_HEALTH_LINK_POLICY?.trim() || "auto-link");
+  if (!(LINK_POLICIES as readonly string[]).includes(v))
+    throw new Error(`[1health] ONE_HEALTH_LINK_POLICY must be "auto-link" or "confirm-first-link", got "${v}"`);
+  return v as LinkPolicy;
+}
+
+/** Endpoints that can create a session for an existing account. A pending launch is linked after any of them
+ *  succeeds for the matching email. OAuth callbacks are included so social-only accounts can confirm too.
+ *  ← Add the sign-in paths of other session-creating plugins the repo uses (passkey, email OTP, …). */
+const LINK_ON_PATHS = ["/sign-in", "/sign-up", "/verify-email", "/callback/", "/oauth2/callback/", "/magic-link/verify"];
+
 /** ctx.redirect() throws better-call's APIError("FOUND"), which is NOT `instanceof` the APIError exported by
  *  better-auth/api (different class). isAPIError() recognises both. */
 const isRedirect = (e: unknown) => isAPIError(e) && e.status === "FOUND";
 
 export const oneHealth = (opts: OneHealthOptions = {}) => {
-  const policy: LinkPolicy = opts.linkPolicy ?? (process.env.ONE_HEALTH_LINK_POLICY as LinkPolicy) ?? "auto-link";
+  const policy = resolvePolicy(opts.linkPolicy);
   const signIn = opts.signInPath ?? "/sign-in";
   const signUp = opts.signUpPath ?? "/sign-up";
   const home = opts.afterLaunchPath ?? "/";
@@ -84,13 +98,17 @@ export const oneHealth = (opts: OneHealthOptions = {}) => {
             if (found) {
               if (found.accounts.some((a) => a.providerId === PROVIDER_ID))
                 throw new LaunchError("identity_conflict");            // email already linked to another 1health user
-              if (policy === "confirm-first-link") {
+              // Never auto-link an account whose email isn't verified: whoever registered it chose its password, and
+              // that may not be the email's owner (pre-account takeover). Treat it as confirm-first-link: the link
+              // happens only after a normal sign-in to that account (which, under requireEmailVerification, means
+              // after verifying the email). The plugin never marks an existing account verified.
+              if (policy === "confirm-first-link" || !found.user.emailVerified) {
                 await setPending(ctx, identity);
-                await audit({ outcome: "pending_confirm", env: identity.env, tenantId: identity.tenantId, oneHealthUserId: identity.userId });
+                await audit({ outcome: "pending_confirm", reason: found.user.emailVerified ? undefined : "account_unverified",
+                              env: identity.env, tenantId: identity.tenantId, oneHealthUserId: identity.userId });
                 throw ctx.redirect(withParam(signIn, "source", "1health"));
               }
               await link(ctx, found.user.id, identity);
-              if (!found.user.emailVerified) await ia.updateUser(found.user.id, { emailVerified: true });
               user = found.user;
             }
           }
@@ -157,9 +175,10 @@ export const oneHealth = (opts: OneHealthOptions = {}) => {
 
     hooks: {
       after: [{
-        // confirm-first-link, and users who register through the normal form during a pending launch:
-        // after any successful sign-in or sign-up, link the pending 1health identity if the emails match.
-        matcher: (ctx) => !!ctx.path && (ctx.path.startsWith("/sign-in") || ctx.path.startsWith("/sign-up") || ctx.path.startsWith("/verify-email")),
+        // confirm-first-link, unverified matches, and users who register through the normal form during a pending
+        // launch: after a successful sign-in, sign-up, email verification or OAuth callback, link the pending
+        // 1health identity if the emails match.
+        matcher: (ctx) => !!ctx.path && LINK_ON_PATHS.some((p) => ctx.path!.startsWith(p)),
         handler: createAuthMiddleware(async (ctx) => {
           const s = ctx.context.newSession;
           if (!s) return;

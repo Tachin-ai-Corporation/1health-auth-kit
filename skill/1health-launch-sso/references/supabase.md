@@ -61,7 +61,33 @@ Browsers don't send URL fragments to servers or include them in `Referer`. Handl
 1. Look for a **linked** identity: `(one_health_env, one_health_tenant_id, one_health_user_id)` on the profile table, or on a `one_health_links` table if the repo has no profile table.
 2. Otherwise match on **email** through the `auth_user_id_by_email` security-definer function, which only `service_role` can execute. Supabase stores emails in lower case.
 3. If the email belongs to an account already linked to a *different* 1health user, return `identity_conflict`.
-4. Never call `generateLink` to find out whether a user exists.
+4. If the matched `auth.users` row is **unconfirmed** (`email_confirmed_at` null), don't link it or mint a session (the magic-link `verifyOtp` would confirm it as a side effect). Send it down the confirm-first-link path: whoever created that row chose its password. See `security.md`, "Pre-account takeover".
+5. Never call `generateLink` to find out whether a user exists.
+
+`linkOneHealthIdentity` / `link_identity` update the row and check that one matched; with no row they insert one, and
+any error becomes `link_failed`. (A bare `update().eq()` "succeeds" with zero rows when there's no profile row.)
+
+## Protect the link columns
+
+A launch signs in as whichever user's row holds the 1health identity, so users must not be able to write
+`one_health_*` themselves. The common "users can update their own profile" policy would let them. `sql/supabase.sql`
+adds a `before insert or update` trigger that rejects changes to those columns from `anon` and `authenticated`
+(`service_role` and migrations are unaffected). A column-level `REVOKE` isn't enough on Supabase, because
+`authenticated` holds a table-level `UPDATE` grant. With a `one_health_links` table instead, enable RLS with no
+policies and grant only `service_role`. Also check the profile table's `SELECT` policies: a "profiles are public"
+policy exposes the 1health ids.
+
+## Config fails fast
+
+`ONE_HEALTH_LINK_COOKIE_SECRET` (32+ characters) and `ONE_HEALTH_LINK_POLICY` (`auto-link`, `confirm-first-link` or
+empty) are validated. FastAPI raises at import. In Next, `config.ts` validates on use and exports
+`assertOneHealthConfig()`; call it from `instrumentation.ts` so the server fails at startup:
+
+```ts
+export async function register() {
+  if (process.env.NEXT_RUNTIME === "nodejs") (await import("@/lib/one-health/config")).assertOneHealthConfig();
+}
+```
 
 ## Sign-up gates hide their message
 
@@ -77,7 +103,7 @@ On the server, that endpoint calls `admin.createUser({ email: <from cookie>, pas
 
 ## Sign-in page (both Supabase stacks)
 
-The launch redirects to the sign-in page with `?error=<code>` on failure, and with `?source=1health` under confirm-first-link. Show `signInNotice({ error, source })` from `templates/shared/messages.ts` (or the table in `references/troubleshooting.md`). Under confirm-first-link, the launch sets the pending cookie and redirects to sign-in with `?source=1health`. After a successful normal sign-in, the page calls `POST /1health/confirm-link`, which links the identity only if the signed-in email equals the pending email.
+The launch redirects to the sign-in page with `?error=<code>` on failure, and with `?source=1health` under confirm-first-link. Show `signInNotice({ error, source })` from `templates/shared/messages.ts` (or the table in `references/troubleshooting.md`). Under confirm-first-link, the launch sets the pending cookie and redirects to sign-in with `?source=1health`. This also happens under `auto-link` when the matched account is unconfirmed (pre-account takeover guard), so wire up confirm-link either way. After a successful normal sign-in, the page calls `POST /1health/confirm-link`, which links the identity only if the signed-in email equals the pending email.
 
 Next.js (`@supabase/ssr`; the request carries the session cookies):
 

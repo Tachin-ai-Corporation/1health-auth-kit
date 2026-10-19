@@ -70,7 +70,7 @@ Ask the user for anything you can't read from the repo, in one message:
    - the **launch secret** (the API key assigned to the app). Ask the user to put it into the env file or hosting secrets themselves, or to paste it only if they're comfortable. You only need the **variable names** to write code.
 3. The **production origin** the launch URL will use, e.g. `https://app.example.com`.
 4. **Linking policy:**
-   - `auto-link` (default): sign in immediately on a verified email match.
+   - `auto-link` (default): sign in immediately on a verified email match. An app account whose own email is unverified is never auto-linked; it always takes the confirm-first-link path (pre-account takeover guard).
    - `confirm-first-link`: the first time, the user signs in to the app once, and after that it's silent. Recommend this for regulated or professional apps, or whenever "an email match alone must not merge accounts".
 5. Optional **tenant allow-list** (`demo:<tenantId>,prod:<tenantId>`).
 6. Whether an **audit table** is wanted (default yes).
@@ -138,7 +138,7 @@ Use the templates as the starting point. Adapt imports, paths and conventions to
   - a fixed HMAC vector;
   - every `LaunchError` path, including a non-JWT token, a non-JSON or non-object `/myself`, a username in the email field, network failures and timeouts.
 - **Better Auth e2e:** `templates/tests/one-health/better-auth-e2e.test.ts` drives the real plugin through `auth.handler` with the memory adapter and mocked 1health. **Adapt `makeAuth()` to mirror the repo's `lib/auth.ts`**: its sign-up gates, `requireEmailVerification`, `autoSignIn` and the exact plugin options (including a `signUpPath` that carries a query). Keep every scenario:
-  - existing user;
+  - existing user (verified: linked; unverified: no link or session until a normal sign-in or verification);
   - relaunch;
   - linked identity wins after an email change;
   - unknown user → registration, with the email taken from the signed cookie;
@@ -149,6 +149,7 @@ Use the templates as the starting point. Adapt imports, paths and conventions to
   - single-use replay;
   - normal sign-up unchanged;
   - confirm-first-link;
+  - an unknown `ONE_HEALTH_LINK_POLICY` throws;
   - a database failure gives `launch_failed`, not a 500.
 - Run the repo's type-check, lint and test commands. Fix anything you broke. If lint can't run (no config), say so; don't add a lint setup.
 

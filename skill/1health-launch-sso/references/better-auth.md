@@ -15,7 +15,9 @@ These were verified on **better-auth 1.6.29**:
 - `GET /1health/launch?lpl=…`: the URL to register in 1health, `{BETTER_AUTH_URL}/api/auth/1health/launch`.
 - `GET /1health/pending`: `{email, firstName, lastName}` from the signed pending cookie, or 404.
 - `POST /1health/complete-registration {name, password}`: creates the user, the credential account and the 1health link, then signs the user in.
-- `hooks.after` on `/sign-in*`, `/sign-up*`, `/verify-email*`: if a pending cookie matches `ctx.context.newSession.user.email`, it links the account. This is how confirm-first-link works, and it also covers users who register through the normal form during a pending launch.
+- `hooks.after` on `/sign-in*`, `/sign-up*`, `/verify-email*`, the OAuth callbacks (`/callback/*`, `/oauth2/callback/*`) and `/magic-link/verify` (`LINK_ON_PATHS`): if a pending cookie matches `ctx.context.newSession.user.email`, it links the account. This is how confirm-first-link and unverified matches get linked, and it also covers users who register through the normal form during a pending launch. OAuth callbacks are included so users whose account has only a social login can confirm. If the repo signs in through other plugins (passkey, email OTP), add their paths.
+- **Email match on an unverified account** (`emailVerified: false`): never auto-linked, never marked verified. The launch takes the confirm-first-link path (pending cookie, `?source=1health` sign-in) whatever the policy. See `security.md`, "Pre-account takeover".
+- **Policy**: `linkPolicy` option, else `ONE_HEALTH_LINK_POLICY` (empty = `auto-link`). Any other value throws when `betterAuth()` is configured, so a typo fails the deploy instead of silently auto-linking.
 
 ## Internal API map (1.6)
 
@@ -24,7 +26,6 @@ These were verified on **better-auth 1.6.29**:
 | Linked identity | `internalAdapter.findAccountByProviderId(accountId, "1health")`, where `accountId = "<env>:<tenantId>:<userId>"` |
 | Email match | `internalAdapter.findUserByEmail(email, { includeAccounts: true })` |
 | Link | `internalAdapter.linkAccount({ userId, providerId: "1health", accountId })` |
-| Mark verified | `internalAdapter.updateUser(id, { emailVerified: true })` |
 | Create user | `internalAdapter.createUser({ email, name, emailVerified: true })`. This **runs `databaseHooks.user.create`**. |
 | Password | `ctx.context.password.hash(pw)` + `linkAccount({ providerId: "credential", accountId: user.id, password })`. Limits come from `ctx.context.password.config.{min,max}PasswordLength`. |
 | Session | `internalAdapter.createSession(userId)` then `setSessionCookie(ctx, { session, user })` (from `better-auth/cookies`), then `throw ctx.redirect(path)`. Cookies survive the thrown redirect. |
@@ -40,7 +41,7 @@ Links are `account` rows with `providerId = "1health"`. `password`, `accessToken
 
 - **`databaseHooks.user.create.before`** (domain gates, invite lists) also applies to 1health registrations. Make sure `complete-registration` errors reach the UI. If the product wants 1health users to bypass the gate, that's a product decision: ask, and don't change the gate yourself.
 - **`databaseHooks.user.create.after`** (for example, adding workspace or organization membership) runs as usual.
-- **`requireEmailVerification`**: plugin sessions skip the email/password check. The plugin sets `emailVerified: true` on link because 1health verified the email. Under confirm-first-link, the normal sign-in still enforces verification.
+- **`requireEmailVerification`**: plugin sessions skip the email/password check, so the plugin only auto-links accounts that are already verified. 1health registrations are created with `emailVerified: true` (1health verified the email). Unverified matches go through the normal sign-in, which still enforces verification; with `sendOnSignIn` and `autoSignInAfterVerification`, clicking the verification link signs the user in and links the pending launch.
 - **Sign-up hidden behind a flag** (for example `?signup=enabled`): set `signUpPath` to a URL that shows the form.
 - **Missing pages referenced by redirects**, such as an "access pending" page: call them out. Don't silently create product pages.
 - **`baseURL`**: set `BETTER_AUTH_URL` explicitly. Registered launch URLs must be on a stable production origin, not on preview or `VERCEL_URL` deployments.

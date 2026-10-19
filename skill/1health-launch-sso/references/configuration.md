@@ -10,9 +10,9 @@ Put the **names** in `.env.example` with no values. Values go in the untracked e
 | `ONE_HEALTH_DEMO_LAUNCH_SECRET` | all | **yes** | if demo is used | The API key assigned to the app on demo. Decrypts `lpl` and signs the code redemption. |
 | `ONE_HEALTH_PROD_APP_ID` | all | no | if production is used | Same, for `https://app.1health.io`. |
 | `ONE_HEALTH_PROD_LAUNCH_SECRET` | all | **yes** | if production is used | Same, for production. Set only the environments you use. |
-| `ONE_HEALTH_LINK_POLICY` | all | no | no | `auto-link` (default) or `confirm-first-link`. Better Auth: the plugin's `linkPolicy` option wins over it. |
+| `ONE_HEALTH_LINK_POLICY` | all | no | no | `auto-link` (default; also when empty) or `confirm-first-link`. Any other value is a startup error (fails closed). Better Auth: the plugin's `linkPolicy` option wins over it. |
 | `ONE_HEALTH_ALLOWED_TENANT_IDS` | all | no | no | Comma-separated `<env>:<tenantId>` allow-list, e.g. `demo:4,prod:123`. Empty means every tenant. |
-| `ONE_HEALTH_LINK_COOKIE_SECRET` | Supabase (Next, FastAPI) | **yes** | yes | 32+ random bytes (`openssl rand -hex 32`). Signs the pending-link cookie. Better Auth signs it with `BETTER_AUTH_SECRET` instead. |
+| `ONE_HEALTH_LINK_COOKIE_SECRET` | Supabase (Next, FastAPI) | **yes** | yes | 32+ random characters (`openssl rand -hex 32`); shorter or missing fails at startup (FastAPI) or via `assertOneHealthConfig()` in `instrumentation.ts` (Next). Signs the pending-link cookie. Better Auth signs it with `BETTER_AUTH_SECRET` instead. |
 | `ONE_HEALTH_APP_ORIGIN` | FastAPI | no | only for split origins | The SPA's origin when it differs from the API's, e.g. `https://app.example.com`. Redirects go there. |
 | `ONE_HEALTH_QA_<ROLE>_KEY` (or `ONE_HEALTH_QA_KEY`) | scripts | **yes** | no | Demo QA user API keys for `scripts/mint-qa-launch.mjs` (`<ROLE>`: `MANAGER`, `EMPLOYEE`, `SYS_ADMIN`). **Local `.env.local` only, never production or hosting.** |
 
@@ -40,7 +40,7 @@ Change them to the repo's real pages during step 1. Sign-up paths may carry a qu
 
 | Template | Launch URL (register in 1health) | Registration | confirm-first-link |
 |---|---|---|---|
-| Better Auth | `{BETTER_AUTH_URL}/api/auth/1health/launch` | `GET /api/auth/1health/pending`, `POST /api/auth/1health/complete-registration` | automatic (`hooks.after` on sign-in, sign-up and verify-email) |
+| Better Auth | `{BETTER_AUTH_URL}/api/auth/1health/launch` | `GET /api/auth/1health/pending`, `POST /api/auth/1health/complete-registration` | automatic (`hooks.after` on sign-in, sign-up, verify-email, OAuth callbacks and magic-link verify) |
 | Supabase + Next.js | `{origin}/1health/launch` | `GET /1health/pending`, `POST /1health/complete-registration` | `POST /1health/confirm-link` (cookies) |
 | Supabase + FastAPI | `{api origin}/1health/launch` | `GET /1health/pending`, `POST /1health/complete-registration` | `POST /1health/confirm-link` (`Authorization: Bearer <access token>`) |
 

@@ -4,7 +4,7 @@ import { LaunchError, resolveLaunch, type OneHealthIdentity } from "@/lib/one-he
 import { mintSupabaseSession } from "@/lib/one-health/session";
 import { auditLaunch, findAppUser, linkOneHealthIdentity } from "@/lib/one-health/users";
 import { setPendingLink } from "@/lib/one-health/pending-cookie";
-import { HOME, POLICY, SIGN_IN, SIGN_UP, withParam } from "@/lib/one-health/config";
+import { HOME, SIGN_IN, SIGN_UP, linkPolicy, withParam } from "@/lib/one-health/config";
 import { rateLimited } from "@/lib/one-health/rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -25,11 +25,14 @@ export async function GET(req: NextRequest) {
       return go(withParam(SIGN_UP, "source", "1health"));
     }
     if (!user.linked) {
-      if (POLICY === "confirm-first-link") {
+      // An unconfirmed auth.users row is never auto-linked or signed in (the magic-link session would also confirm
+      // it): whoever created it chose its password, and may not own the email (pre-account takeover). It takes the
+      // confirm-first-link path: the user confirms the email, signs in, and confirm-link links.
+      if (linkPolicy() === "confirm-first-link" || !user.verified) {
         // After a successful normal sign-in, the sign-in page POSTs /1health/confirm-link (confirm-link-route.ts),
         // which links the identity. See references/supabase.md, "confirm-first-link".
         await setPendingLink(identity);
-        await auditLaunch("pending_confirm", identity);
+        await auditLaunch("pending_confirm", identity, { reason: user.verified ? undefined : "account_unverified" });
         return go(withParam(SIGN_IN, "source", "1health"));
       }
       await linkOneHealthIdentity(user.id, identity);

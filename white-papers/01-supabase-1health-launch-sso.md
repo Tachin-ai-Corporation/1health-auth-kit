@@ -171,6 +171,8 @@ create unique index if not exists profiles_one_health_identity_uidx
   on public.profiles (one_health_env, one_health_tenant_id, one_health_user_id)
   where one_health_user_id is not null;
 
+-- Plus a trigger that stops anon/authenticated from writing one_health_* (§5.5); see the skill's sql/supabase.sql.
+
 create table if not exists public.one_health_launch_audit (
   id bigint generated always as identity primary key,
   created_at timestamptz not null default now(),
@@ -203,8 +205,8 @@ grant execute on function public.auth_user_id_by_email(text) to service_role;
 | `ONE_HEALTH_DEMO_LAUNCH_SECRET`, `ONE_HEALTH_DEMO_APP_ID` | Demo registration. |
 | `ONE_HEALTH_PROD_LAUNCH_SECRET`, `ONE_HEALTH_PROD_APP_ID` | Production registration. Set only the environments you use. |
 | `ONE_HEALTH_ALLOWED_TENANT_IDS` | Optional allow-list, e.g. `demo:123,prod:456`. |
-| `ONE_HEALTH_LINK_COOKIE_SECRET` | 32+ random bytes. Signs the pending-link cookie. |
-| `ONE_HEALTH_LINK_POLICY` | `auto-link` (default) or `confirm-first-link`. See §5.4. |
+| `ONE_HEALTH_LINK_COOKIE_SECRET` | 32+ random characters (`openssl rand -hex 32`). Signs the pending-link cookie. The app refuses to start without it: `itsdangerous` accepts an empty key, which would make the cookie forgeable. |
+| `ONE_HEALTH_LINK_POLICY` | `auto-link` (default; also when empty) or `confirm-first-link`. Any other value is a startup error, never a silent `auto-link`. See §5.4. |
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` (publishable), `SUPABASE_SERVICE_ROLE_KEY` (secret) | Existing. |
 
 The base URLs are constants (`https://demo.1health.io` and `https://app.1health.io`), so they don't need configuration.
@@ -421,13 +423,14 @@ The TypeScript version is `resolveLaunch(lpl)` in `templates/ts/protocol.ts` (wh
 1. **By linked identity**: `(one_health_env, one_health_tenant_id, one_health_user_id)`. This stays stable even if the user's email changes.
 2. **By email**: through your profile table or `auth_user_id_by_email()`.
 3. If the email match is **already linked to a different 1health user**, fail with `identity_conflict`. Don't log it and continue.
-4. Never call `generateLink` to find out whether a user exists. Look the user up first.
+4. If the matched `auth.users` row is **unconfirmed** (`email_confirmed_at` is null), never link it or mint a session for it, whatever the policy. Anyone can sign up with someone else's address and choose the password; linking that row (the magic-link session would also confirm it) would hand the real owner an account the other person can sign in to. Treat it as `confirm-first-link` below: the link follows the owner's own confirmation and sign-in.
+5. Never call `generateLink` to find out whether a user exists. Look the user up first.
 
 When step 2 finds an account that is **not yet linked**, what happens next depends on a policy you choose up front:
 
 | Policy | First launch for an existing, unlinked account | Later launches | Choose it when |
 |---|---|---|---|
-| **`auto-link`** (default) | Link and sign in straight away on a *verified* email match | Silent sign-in on the linked ID | Consumer apps, or wherever "Sign in with Google"-style trust in the email is acceptable |
+| **`auto-link`** (default) | Link and sign in straight away on a *verified* email match, if the app account's own email is confirmed (otherwise as `confirm-first-link`) | Silent sign-in on the linked ID | Consumer apps, or wherever "Sign in with Google"-style trust in the email is acceptable |
 | **`confirm-first-link`** | Set the pending-link cookie and send the user to your normal sign-in page with a notice ("Sign in once to connect your 1health account"). After a successful sign-in (password, MFA, whatever you normally require), link and continue. | Silent sign-in on the linked ID | Regulated or professional apps, or where an email match alone must not merge accounts |
 
 `confirm-first-link` reuses the pending-link cookie from §5.8. After any normal sign-in, if a valid cookie is present and its email matches the signed-in user, link the identity and clear the cookie. It also closes most of the login-CSRF gap described in §6, because the first link needs the victim's own credentials.
@@ -435,6 +438,9 @@ When step 2 finds an account that is **not yet linked**, what happens next depen
 ### 5.5 Link the identity
 
 On the first match, write the three `one_health_*` columns with the service role. On later launches, check they still match.
+
+- **Check the write happened.** `update().eq(id)` "succeeds" with zero rows when the user has no profile row (or on a `one_health_links` table). Check the returned rows, insert when nothing matched, and fail with `link_failed` on any error.
+- **Only the server may write these columns.** A launch signs in as whichever user's row holds the identity, so a user who could set `one_health_*` on their own row (a typical "users update own profile" RLS policy allows it) could make another person's launch land in their account. A column-level `REVOKE` doesn't help while `authenticated` has the table-level `UPDATE` grant Supabase gives it by default; use a trigger that rejects changes from `anon`/`authenticated`, or keep the link in a `one_health_links` table with RLS on, no policies and only `service_role` grants.
 
 ### 5.6 Issue a native Supabase session
 
@@ -553,7 +559,7 @@ import { LaunchError, resolveLaunch, type OneHealthIdentity } from "@/lib/one-he
 import { mintSupabaseSession } from "@/lib/one-health/session";
 import { auditLaunch, findAppUser, linkOneHealthIdentity } from "@/lib/one-health/users";
 import { setPendingLink } from "@/lib/one-health/pending-cookie";
-import { HOME, POLICY, SIGN_IN, SIGN_UP, withParam } from "@/lib/one-health/config";
+import { HOME, SIGN_IN, SIGN_UP, linkPolicy, withParam } from "@/lib/one-health/config";
 import { rateLimited } from "@/lib/one-health/rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -574,11 +580,14 @@ export async function GET(req: NextRequest) {
       return go(withParam(SIGN_UP, "source", "1health"));
     }
     if (!user.linked) {
-      if (POLICY === "confirm-first-link") {
+      // An unconfirmed auth.users row is never auto-linked or signed in (the magic-link session would also confirm
+      // it): whoever created it chose its password, and may not own the email (pre-account takeover). It takes the
+      // confirm-first-link path: the user confirms the email, signs in, and confirm-link links.
+      if (linkPolicy() === "confirm-first-link" || !user.verified) {
         // After a successful normal sign-in, the sign-in page POSTs /1health/confirm-link (confirm-link-route.ts),
         // which links the identity. See references/supabase.md, "confirm-first-link".
         await setPendingLink(identity);
-        await auditLaunch("pending_confirm", identity);
+        await auditLaunch("pending_confirm", identity, { reason: user.verified ? undefined : "account_unverified" });
         return go(withParam(SIGN_IN, "source", "1health"));
       }
       await linkOneHealthIdentity(user.id, identity);
