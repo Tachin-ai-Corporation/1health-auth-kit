@@ -1,0 +1,7 @@
+fastapi
+httpx
+PyJWT
+cryptography
+itsdangerous
+supabase
+pytest
