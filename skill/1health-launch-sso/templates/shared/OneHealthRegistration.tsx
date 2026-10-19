@@ -1,7 +1,9 @@
 "use client";
 // Render on the sign-up page when ?source=1health is present. Adapt markup to the repo's form components.
-// Better Auth: defaults work as-is. Supabase templates: pass pendingUrl="/1health/pending" and
-// completeUrl="/1health/complete-registration".
+// Better Auth: defaults work as-is. Supabase templates (Next.js and FastAPI): pass pendingUrl="/1health/pending" and
+// completeUrl="/1health/complete-registration". Every stack answers errors as JSON { message }.
+// FastAPI on a different origin from the SPA: pass the API's absolute URLs and change `credentials` to "include"
+// (references/supabase.md, "Split API and SPA origins").
 import { useEffect, useState } from "react";
 
 type Pending = { email: string; firstName: string | null; lastName: string | null };

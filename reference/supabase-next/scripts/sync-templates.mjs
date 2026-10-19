@@ -13,7 +13,11 @@ const MAP = {
   "supabase-next/pending-cookie.ts": "lib/one-health/pending-cookie.ts",
   "supabase-next/launch-route.ts": "lib/one-health/launch-route.ts",
   "supabase-next/registration-routes.ts": "lib/one-health/registration-routes.ts",
-  "better-auth/OneHealthRegistration.tsx": "components/OneHealthRegistration.tsx",
+  "supabase-next/confirm-link-route.ts": "lib/one-health/confirm-link-route.ts",
+  "supabase-next/config.ts": "lib/one-health/config.ts",
+  "supabase-next/rate-limit.ts": "lib/one-health/rate-limit.ts",
+  "shared/messages.ts": "lib/one-health/messages.ts",
+  "shared/OneHealthRegistration.tsx": "components/OneHealthRegistration.tsx",
 };
 const check = process.argv.includes("--check");
 let drift = 0;

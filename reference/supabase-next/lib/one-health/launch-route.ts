@@ -4,20 +4,16 @@ import { LaunchError, resolveLaunch, type OneHealthIdentity } from "@/lib/one-he
 import { mintSupabaseSession } from "@/lib/one-health/session";
 import { auditLaunch, findAppUser, linkOneHealthIdentity } from "@/lib/one-health/users";
 import { setPendingLink } from "@/lib/one-health/pending-cookie";
+import { HOME, POLICY, SIGN_IN, SIGN_UP, withParam } from "@/lib/one-health/config";
+import { rateLimited } from "@/lib/one-health/rate-limit";
 
 export const dynamic = "force-dynamic";
-
-const SIGN_IN = "/login";      // ← adapt
-const SIGN_UP = "/signup";     // ← adapt
-const HOME = "/";              // ← adapt
-const withParam = (path: string, key: string, value: string) =>   // SIGN_UP may already carry a query string
-  `${path}${path.includes("?") ? "&" : "?"}${key}=${encodeURIComponent(value)}`;
-const POLICY = process.env.ONE_HEALTH_LINK_POLICY === "confirm-first-link" ? "confirm-first-link" : "auto-link";
 
 export async function GET(req: NextRequest) {
   const go = (path: string) => NextResponse.redirect(new URL(path, req.url), 303);
   let identity: OneHealthIdentity | undefined;
   try {
+    if (rateLimited(req, "launch")) throw new LaunchError("rate_limited");
     const lpl = req.nextUrl.searchParams.get("lpl");
     if (!lpl) throw new LaunchError("launch_missing");
     identity = await resolveLaunch(lpl);
@@ -30,7 +26,8 @@ export async function GET(req: NextRequest) {
     }
     if (!user.linked) {
       if (POLICY === "confirm-first-link") {
-        // The sign-in handler links after a successful normal sign-in (see references/supabase.md §confirm).
+        // After a successful normal sign-in, the sign-in page POSTs /1health/confirm-link (confirm-link-route.ts),
+        // which links the identity. See references/supabase.md, "confirm-first-link".
         await setPendingLink(identity);
         await auditLaunch("pending_confirm", identity);
         return go(withParam(SIGN_IN, "source", "1health"));
