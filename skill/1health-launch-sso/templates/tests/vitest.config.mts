@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },  // match tsconfig "paths"
+  // "@" must match tsconfig "paths": "@/*": ["./*"] → new URL(".", …); "@/*": ["./src/*"] → new URL("./src", …).
+  resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },
   test: { environment: "node", include: ["tests/**/*.test.ts"], setupFiles: ["tests/setup-env.ts"] },
 });

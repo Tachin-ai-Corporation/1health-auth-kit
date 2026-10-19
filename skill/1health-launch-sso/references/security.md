@@ -13,12 +13,12 @@
 | 9 | Registration takes the email from the **signed cookie**, never from the request body | Required |
 | 10 | Tenant allow-list for private apps or pilots | Recommended |
 | 11 | `confirm-first-link` where "an email match alone must not merge accounts" (regulated or professional apps) | Recommended |
-| 12 | Rate limits on the launch and registration routes | Recommended |
+| 12 | Rate limits on the launch and registration routes. Better Auth: `rateLimit.customRules`. Supabase templates: built-in per-instance limiter; add a shared one (Redis, WAF) for multi-instance hosting. See `references/configuration.md`. | Recommended |
 | 13 | Launch query strings (`lpl`) kept out of access logs. `next dev` prints full request URLs, and Vercel request logs include query strings, so filter log drains. | Recommended |
 | 14 | Audit row per launch with identifiers only. No emails, tokens, codes or `/myself` bodies. | Recommended |
 | 15 | QA launch-minting code and keys disabled and absent in production | Required if present |
-| 17 | Unexpected server errors in the launch route redirect to `?error=launch_failed` (logged without `lpl`, tokens or `/myself` bodies). Never a raw 500 page. | Required |
-| 16 | MFA apps: minted sessions are AAL1, so step-up still applies | Required with MFA |
+| 16 | Unexpected server errors in the launch route redirect to `?error=launch_failed` (logged without `lpl`, tokens or `/myself` bodies). Never a raw 500 page. | Required |
+| 17 | MFA apps: minted sessions are AAL1, so step-up still applies | Required with MFA |
 
 ## Residual risk: login CSRF
 

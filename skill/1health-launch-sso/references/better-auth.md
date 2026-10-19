@@ -1,6 +1,6 @@
 # Better Auth recipe
 
-Templates: `templates/ts/protocol.ts`, `templates/better-auth/plugin.ts`, `templates/better-auth/OneHealthRegistration.tsx`, `templates/tests/one-health/better-auth-e2e.test.ts` (+ `protocol.test.ts`, `helpers.ts`, `../setup-env.ts`), `templates/scripts/probe-launch.mjs`, `templates/scripts/mint-qa-launch.mjs`. Runnable copy: `reference/better-auth/`.
+Templates: `templates/ts/protocol.ts`, `templates/better-auth/plugin.ts`, `templates/shared/OneHealthRegistration.tsx`, `templates/shared/messages.ts`, `templates/tests/one-health/better-auth-e2e.test.ts` (+ `protocol.test.ts`, `helpers.ts`, `../setup-env.ts`), `templates/scripts/probe-launch.mjs`, `templates/scripts/mint-qa-launch.mjs`.
 
 These were verified on **better-auth 1.6.29**:
 - They type-check, and the vitest suite passes: 31 tests across the protocol module and the plugin through `auth.handler` with the memory adapter and mocked 1health.

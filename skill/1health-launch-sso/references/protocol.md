@@ -69,11 +69,7 @@ Authorization: Bearer <demo QA user's API key>
 
 Use it as `?lpl=`. Each payload works once. Demo throttles bursts (you'll get 401s for minutes), so don't retry in a loop. QA keys must never reach production. Manager, employee and sys-admin QA keys could all mint for Carrier's app (Oct 2026).
 
-**Re-targeting a real launch.** A tile click opens `<registered launch URL>?lpl=…`. If that host can't handle it yet (e.g. production before merge returns 404), the code is still unspent. Swap the origin for a preview's and open it within the code lifetime. This works because every deployment shares the same secret.
-
-**Capturing a real person's launch without spending it.** On the 1health Apps page, override `window.open` in DevTools to log the URL, then click the tile. The tile calls `window.open(<launch URL>?lpl=…)`, so nothing opens and the code stays unspent. Swap the origin and path for the app under test.
-
-**Configuration probe (no 1health login needed).** Encrypt a well-formed payload with the local secret and a fake code, then send it to a deployment (`templates/scripts/probe-launch.mjs`). `token_exchange_failed` proves that deployment has the same secret and reaches 1health. `payload_invalid` means its secret is missing or different.
+Re-targeting a real tile launch, capturing one without spending it, and probing a deployment's configuration are in `references/testing.md`.
 
 ## Documentation vs. observed behavior
 

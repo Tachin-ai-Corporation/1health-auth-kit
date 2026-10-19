@@ -11,9 +11,11 @@ Supported stacks:
 
 | Auth | Server | Template set |
 |---|---|---|
-| Better Auth | Next.js (App Router), Hono, Express, Fastify, or any Node server that mounts `auth.handler` | `templates/better-auth/` + `templates/ts/protocol.ts` |
-| Supabase Auth | Next.js with `@supabase/ssr` (cookie sessions) | `templates/supabase-next/` + `templates/ts/protocol.ts` |
-| Supabase Auth | Python FastAPI (supabase-py), sessions held in the browser | `templates/supabase-fastapi/` |
+| Better Auth | Next.js (App Router), Hono, Express, Fastify, or any Node server that mounts `auth.handler` | `templates/better-auth/` + `templates/ts/protocol.ts` + `templates/shared/` |
+| Supabase Auth | Next.js with `@supabase/ssr` (cookie sessions) | `templates/supabase-next/` + `templates/ts/protocol.ts` + `templates/shared/` |
+| Supabase Auth | Python FastAPI (supabase-py), sessions held in the browser | `templates/supabase-fastapi/` + `templates/shared/OneHealthRegistration.tsx` |
+
+Everything this skill needs is inside this directory: `references/` and `templates/`.
 
 **How well each set is proven (Oct 2026).**
 - **Better Auth:** live-verified against 1health demo in a production app.
@@ -53,7 +55,8 @@ Read `package.json` / `pnpm-lock.yaml` / `requirements*.txt` / `pyproject.toml` 
 - **Migration style.** drizzle-kit, Supabase migrations folder, or hand-written SQL scripts.
 - **Test runner.** vitest, jest, pytest, or none. If there's none, you'll add vitest (§5). Note the tsconfig `target`: below ES2017, top-level `await` in tests fails `tsc`.
 - **Dependencies the templates import.** `jose`, and for Better Auth also `zod`. These are often only transitive (zod comes in through better-auth), so add them as direct dependencies.
-- **Sign-in and sign-up page paths**, including any query flag that sign-up needs to render (`?signup=enabled`, `?invite=…`). The plugin and routes append `source=1health` correctly to a path that already has a query.
+- **Sign-in and sign-up page paths**, including any query flag that sign-up needs to render (`?signup=enabled`, `?invite=…`). Compare them with each template's defaults in `references/configuration.md` (Better Auth `/sign-in` + `/sign-up`; Supabase Next `/login` + `/signup`; FastAPI `/login` + `/register`). The plugin and routes append `source=1health` correctly to a path that already has a query.
+- **Origins** (FastAPI): does the SPA share the API's origin? If not, read "Split API and SPA origins" in `references/supabase.md`.
 
 Summarize what you found for the user in a few lines before changing anything.
 
@@ -98,8 +101,8 @@ Use the templates as the starting point. Adapt imports, paths and conventions to
 2. Copy `templates/better-auth/plugin.ts` to `lib/one-health/plugin.ts`.
 3. Register `oneHealth({ signInPath, signUpPath, afterLaunchPath, onLaunch })` in the `betterAuth({ plugins: [...] })` call. If the repo uses `nextCookies()`, put it before that; if not, don't add it. Add `rateLimit.customRules` for `/1health/launch` and `/1health/complete-registration`.
 4. The existing catch-all auth route already serves the new endpoints. No new route file is needed.
-5. Registration UI: add `templates/better-auth/OneHealthRegistration.tsx` (adapt it to the repo's form components) to the sign-up page when `?source=1health` is present. If sign-up is hidden behind a query flag, set `signUpPath` to a URL that shows the form.
-6. Sign-in page: show friendly text for `?error=<code>` and `?source=1health`. Copy is in `references/troubleshooting.md`.
+5. Registration UI: add `templates/shared/OneHealthRegistration.tsx` (adapt it to the repo's form components) to the sign-up page when `?source=1health` is present. If sign-up is hidden behind a query flag, set `signUpPath` to a URL that shows the form.
+6. Sign-in page: show friendly text for `?error=<code>` and `?source=1health`. Copy `templates/shared/messages.ts` to `lib/one-health/messages.ts` and render `signInNotice({ error, source })`.
 7. No schema change is needed: links live in `account` (`providerId = "1health"`). Optionally add a unique index on `(providerId, accountId)` and the audit table (`templates/sql/better-auth-audit.sql`, plus a Drizzle table if the repo mirrors its schema in Drizzle).
 8. Add `jose` (it decodes the token without verifying) and `zod` (the plugin's request schemas) as direct dependencies, unless they already are.
 9. Don't change how the plugin template detects redirects or maps errors. `ctx.redirect()` throws better-call's `APIError`, which is **not** `instanceof` the `APIError` from `better-auth/api`. The template uses `isAPIError(e) && e.status === "FOUND"` and maps every other unexpected error to `?error=launch_failed`. The e2e test guards this.
@@ -107,27 +110,29 @@ Use the templates as the starting point. Adapt imports, paths and conventions to
 **Supabase + Next.js** (`references/supabase.md`):
 
 1. Copy `templates/ts/protocol.ts` to `lib/one-health/protocol.ts`.
-2. Copy and adapt `templates/supabase-next/`: `session.ts`, `pending-cookie.ts`, `users.ts`, and route handlers `app/1health/launch/route.ts`, `app/1health/pending/route.ts`, `app/1health/complete-registration/route.ts`.
+2. Copy and adapt `templates/supabase-next/` into `lib/one-health/`: `config.ts` (sign-in/sign-up/home paths, policy), `session.ts`, `pending-cookie.ts`, `users.ts`, `rate-limit.ts`, `launch-route.ts`, `registration-routes.ts`, `confirm-link-route.ts`. Then add four two-line route files that re-export them: `app/1health/launch/route.ts` (`GET`), `app/1health/pending/route.ts` (`GET`), `app/1health/complete-registration/route.ts` (`POST`) and `app/1health/confirm-link/route.ts` (`POST`). The file table is in `references/supabase.md`.
 3. Run the migration `templates/sql/supabase.sql` (identity columns or table, audit table, email lookup function) in the repo's migration style.
-4. Registration UI as above, posting to `/1health/complete-registration`.
-5. The launch URL is `{origin}/1health/launch`.
+4. Registration UI: `templates/shared/OneHealthRegistration.tsx` with `pendingUrl="/1health/pending"` and `completeUrl="/1health/complete-registration"`.
+5. Sign-in page: copy `templates/shared/messages.ts`, show `signInNotice({ error, source })`, and under confirm-first-link call `POST /1health/confirm-link` after a successful sign-in (snippet in `references/supabase.md`, "Sign-in page").
+6. The launch URL is `{origin}/1health/launch`.
 
 **Supabase + FastAPI** (`references/supabase.md`):
 
-1. Copy `templates/supabase-fastapi/one_health.py` into the app's package. Wire its settings to the repo's settings module, and mount the router.
+1. Copy `templates/supabase-fastapi/one_health.py` into the app's package. Wire its settings to the repo's settings module, set `SIGN_IN`/`SIGN_UP`/`HOME`, and mount the router.
 2. Run `templates/sql/supabase.sql`.
-3. Frontend boot code: if the URL fragment contains `access_token` and `refresh_token` with `type=magiclink`, store them the way the app stores its session today, then call `history.replaceState` to clear the fragment. Registration UI as above.
-4. Add the launch host to `ALLOWED_HOSTS` / `TrustedHostMiddleware` if present.
+3. Frontend boot code: store the session from the URL fragment and clear it (snippet in `references/supabase.md`, "FastAPI frontend boot code"). Registration UI: `templates/shared/OneHealthRegistration.tsx` with the Supabase URLs (errors come back as `{ message }`). Sign-in page: `?error` / `?source` copy and the `confirm-link` call with the Bearer token (same section).
+4. Split API and SPA origins: set `ONE_HEALTH_APP_ORIGIN`, and handle cookies and CORS as described in `references/supabase.md`, or proxy `/1health/*` through the SPA's origin.
+5. Add the launch host to `ALLOWED_HOSTS` / `TrustedHostMiddleware` if present.
 
 **All stacks.**
 
-- Add the env var **names** to `.env.example` (no values).
+- Add the env var **names** to `.env.example` (no values), from the canonical table in `references/configuration.md`: the `ONE_HEALTH_*` variables for this stack and environment(s), plus any stack variable the templates read that the file doesn't list yet. QA keys go in a comment marked local-only.
 - Add a short `docs/1health-sso.md` covering how it works, the env vars, the dashboard steps, and how to test.
 - Copy `templates/scripts/mint-qa-launch.mjs` and `templates/scripts/probe-launch.mjs` into `scripts/`.
 
 ### 5. Test
 
-- **Test runner.** Use the repo's runner. If there is none, add vitest with `templates/tests/vitest.config.mts`, and add `"test": "vitest run"`. Set env in `setupFiles` (`templates/tests/setup-env.ts`), because the protocol module reads env at import time.
+- **Test runner.** Use the repo's runner. If there is none, add vitest with `templates/tests/vitest.config.mts` (point its `@` alias at the same folder as tsconfig `paths`, e.g. `./src` in `src/` repos), and add `"test": "vitest run"`. Set env in `setupFiles` (`templates/tests/setup-env.ts`), because the protocol module reads env at import time.
 - **Protocol unit tests:** `templates/tests/one-health/protocol.test.ts` (vitest; jest is near-identical) or `templates/tests/test_one_health.py` (pytest, FastAPI). They cover:
   - the decrypt round-trip and environment detection;
   - a fixed HMAC vector;
@@ -160,7 +165,7 @@ Tell the user exactly what remains for them, step by step and in plain words. Us
    - mint a launch for the preview with `scripts/mint-qa-launch.mjs <previewLaunchUrl>`; or
    - click the tile, then replace the origin in the 404 page's address bar with the preview's origin, keeping the path and `?lpl=…`, and press Enter within a few minutes. The code hasn't been spent.
 
-   - If production already serves the route, the tile spends the code there. Instead, capture the launch on the 1health Apps page: in DevTools, override `window.open` to print the URL, then click the tile. See `reference/supabase-next/README.md`.
+   - If production already serves the route, the tile spends the code there. Instead, capture the launch on the 1health Apps page: in DevTools, override `window.open` to print the URL, then click the tile. The snippet and steps are in `references/testing.md`.
    - **API keys can't stand in for people.** Every demo API key launches as its own `system_…` user, with a username in `/myself.email`, so it only exercises `identity_no_email`. The linking and registration scenarios need real demo users with verified emails: one matching an existing app user, and one new. Their launches have to be captured.
 7. **After merge:** click the tile on production and run the scenario matrix in `references/troubleshooting.md`.
 
@@ -170,9 +175,11 @@ Also list every **skill gap** you hit (a template you had to fix, a step that wa
 
 ## References
 
+- `references/configuration.md`: every env var (all stacks), default paths and routes per template, rate limits.
 - `references/protocol.md`: launch payload, crypto, endpoints, claims, environments, documentation discrepancies.
+- `references/testing.md`: probing deployments, minting QA launches, re-targeting and capturing real tile launches.
 - `references/better-auth.md`: plugin design, internal-adapter API map, gotchas.
-- `references/supabase.md`: session minting (`generateLink` + `verifyOtp`), delivery by session model, gotchas.
+- `references/supabase.md`: session minting (`generateLink` + `verifyOtp`), delivery by session model, Next.js file map, sign-in snippet, FastAPI boot code, split origins, rate limits, gotchas.
 - `references/security.md`: checklist and residual risks (login CSRF).
 - `references/1health-setup.md`: 1health-side registration, roles, QA keys.
 - `references/troubleshooting.md`: error codes, user-facing copy, scenario matrix.

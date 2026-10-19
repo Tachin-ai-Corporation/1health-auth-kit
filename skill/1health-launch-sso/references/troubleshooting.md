@@ -2,6 +2,8 @@
 
 ## `?error=` codes (from the launch route)
 
+`templates/shared/messages.ts` holds this copy as code (`signInNotice({ error, source })`) for TypeScript apps.
+
 | Code | Meaning | Copy for the sign-in page |
 |---|---|---|
 | `launch_missing` | No `lpl` parameter | "Open this app from the 1health Apps screen." |
@@ -12,6 +14,7 @@
 | `identity_no_email` | `/myself` has no email **address**. Demo QA/system users return a username. | "Your 1health account doesn't have an email address. Add one in 1health, then open the app again." |
 | `email_not_verified` | 1health email not verified | "Verify your email in 1health, then open the app again." |
 | `tenant_not_allowed` | Tenant not on the allow-list | "Your organization isn't set up for this app yet." |
+| `rate_limited` (Supabase templates) | Too many launches from this IP in the window | "Too many sign-in attempts. Wait a minute, then open the app from 1health again." |
 | `identity_conflict` | Email already linked to another 1health account | "This account is already connected to a different 1health user. Contact support." |
 | `session_mint_failed` / `user_lookup_failed` / `link_failed` (Supabase) / `launch_failed` (any stack) | Server-side failure. `launch_failed` covers any unexpected error and is logged as `[1health] launch failed` | "Something went wrong signing you in. Try again from 1health." |
 
@@ -31,7 +34,7 @@
 | Sign-up URL looks like `/sign-up?x=1?source=1health` | Old template string-concatenated a query | Use the template's `withParam` |
 | Raw 500 page on launch | Old Better Auth template rethrew non-`LaunchError`s (an `instanceof APIError` check misses redirects) | Use `isAPIError(e) && e.status === "FOUND"`, and map the rest to `launch_failed` |
 | Supabase registration says "Registration failed." for gated emails | Supabase reports trigger and hook rejections as a 500 "Database error creating new user" | Use the template's mapping (it shows the gate copy), or check the gate before `createUser` |
-| QA-key launches always give `identity_no_email` | Each API key launches as its own `system_…` user, which has a username for an email | Capture a real person's tile launch (`references/protocol.md`) |
+| QA-key launches always give `identity_no_email` | Each API key launches as its own `system_…` user, which has a username for an email | Capture a real person's tile launch (`references/testing.md`) |
 | `pnpm` prompts to reinstall `node_modules` from scratch | A different pnpm major from the one that made `node_modules`/the lockfile | Answer **n**. Use `npx pnpm@<major>`, or run `npx next dev` directly |
 | Signed in on launch, then signed out | Cookie not stored: Secure cookie over HTTP, or the origin differs from the configured base URL | Same origin, HTTPS |
 | Apps tile missing | User's role can't see Apps | Manager role, then sign out and back in |
